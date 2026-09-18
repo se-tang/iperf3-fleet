@@ -40,21 +40,22 @@ textarea{width:100%;min-height:110px;resize:vertical;font-family:ui-monospace,Co
 .hint code{background:#0b1220;padding:1px 5px;border-radius:4px}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0}
 pre{background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:12px;overflow:auto;font-size:12px;max-height:340px;font-family:ui-monospace,Consolas,monospace}
-.hidden{display:none}
-.muted{color:var(--muted)}
-.rating-s{color:var(--green);font-weight:600}
-.rating-a{color:var(--lime);font-weight:600}
-.rating-b{color:var(--orange);font-weight:600}
-.rating-c{color:var(--red);font-weight:600}
-.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:50}
+details{border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin:8px 0}
+summary{cursor:pointer;font-weight:600}
 .modal{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;width:620px;max-width:94vw;max-height:92vh;overflow:auto}
 .modal h3{margin:0 0 12px;color:var(--text);font-size:16px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .grid2 label,.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:3px}
 .grid2 input,.grid2 select,.field input,.field select{width:100%}
 .field{margin-bottom:10px}
-details{border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin:8px 0}
-summary{cursor:pointer;font-weight:600}
+.muted{color:var(--muted)}
+.rating-s{color:var(--green);font-weight:600}
+.rating-a{color:var(--lime);font-weight:600}
+.rating-b{color:var(--orange);font-weight:600}
+.rating-c{color:var(--red);font-weight:600}
+.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:50}
+/* hidden 必须排在 modal-mask 之后并用 !important，否则 display:flex 会覆盖掉隐藏（历史 bug） */
+.hidden{display:none!important}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#0284c7;color:#fff;padding:10px 18px;border-radius:8px;z-index:99;max-width:80vw;box-shadow:0 6px 20px rgba(0,0,0,.4)}
 .actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .chk{display:flex;align-items:center;gap:6px;font-size:13px}
