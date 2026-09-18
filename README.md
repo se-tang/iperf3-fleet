@@ -2,6 +2,26 @@
 
 一个 Docker 化的 iperf3 多机线路质量测试面板。在网页上添加若干台 VPS（SSH 方式管理），指定其中一台为**目标机器**（被测端），其余为**后端机器**（发起测试端），一键即可逐台完成线路测试并生成带**线路质量评价**的 Markdown 报告。
 
+## 一键部署（复制即用）
+
+**方式一：git 克隆** —— 下面整行复制到你的服务器终端执行即可（`git clone` 会自动创建目录，不需要提前手动建）：
+
+```bash
+git clone https://github.com/se-tang/iperf3-fleet.git && cd iperf3-fleet && docker compose up -d --build
+```
+
+**方式二：网页下载 ZIP** —— 仓库页面右上角 **Code → Download ZIP**，把压缩包传到你的机器解压，进入解压出来的目录（一般叫 `iperf3-fleet-main`），执行：
+
+```bash
+docker compose up -d --build
+```
+
+> 原则就一条：**在你放代码的那个目录里执行 `docker compose up -d --build`**，面板就部署在哪，对目录名没有任何要求。
+
+部署完成后浏览器打开 `http://服务器IP:8088` 进入面板。测试数据（SQLite 数据库 + 测试记录）保存在代码目录下的 `./data` 文件夹，升级代码不影响数据。
+
+> 不想用 Docker 也可以：`pip install -r requirements.txt && python -m app.app`（Windows 默认数据目录为项目下 `data/`，Linux 下为 `/data`，可用环境变量 `DATA_DIR` 覆盖）。
+
 ## 功能
 
 - **机器管理**：添加/编辑/删除机器，支持命名、**带宽标记**（如 `500M`/`1G`）、**地区标记**（如 `香港`），角色分为「后端机器」和「目标机器」。
@@ -15,18 +35,6 @@
   3. 一台测完自动测下一台；全程实时日志可在面板查看，支持中途停止。
 - **测试报告**：自动汇总为 Markdown 表格（后端机器、地区、带宽、丢包率、RTT、抖动、上行/下行、重传、**线路质量评价**列），并附每台机器的原始摘录（ping 汇总两行 + 上下行汇总三行）。支持一键复制 / 下载 `.md`。
 - **质量评价依据**：丢包率、抖动(mdev)、重传次数、上下行收发比，以及**标称带宽达成率**（如标记 `500M` 实测只有 137M 会在评价中指出）。评级：优秀 / 良好 / 一般 / 较差。
-
-## 快速开始
-
-```bash
-git clone https://github.com/se-tang/iperf3-fleet.git
-cd iperf3-fleet
-docker compose up -d --build
-```
-
-浏览器打开 `http://面板机IP:8088` 即可。数据（SQLite + 测试记录）持久化在 `./data` 目录。
-
-> 不用 Docker 也可以：`pip install -r requirements.txt && python -m app.app`（Windows 默认数据目录为项目下 `data/`，Linux 下为 `/data`，可用环境变量 `DATA_DIR` 覆盖）。
 
 ## 使用步骤
 
