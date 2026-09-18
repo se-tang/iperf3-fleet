@@ -1,0 +1,13 @@
+services:
+  iperf3-panel:
+    build: .
+    image: iperf3-panel:latest
+    container_name: iperf3-panel
+    restart: unless-stopped
+    ports:
+      - "8088:8000"
+    environment:
+      TZ: Asia/Shanghai
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
