@@ -3,7 +3,10 @@ import base64
 import datetime
 import json
 import os
+import re
 import secrets
+import threading
+import time
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, session
 
@@ -14,11 +17,48 @@ app.json.ensure_ascii = False
 app.secret_key = db.get_secret_key()
 app.permanent_session_lifetime = datetime.timedelta(days=30)
 
+# 安全配置：请求体上限 + 会话 Cookie 属性
+app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+if os.environ.get('PANEL_COOKIE_SECURE') == '1':
+    # 套了 HTTPS 反代时设置，Cookie 只经加密连接传输
+    app.config['SESSION_COOKIE_SECURE'] = True
+
 AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent')
 
 # 无需登录即可访问：登录页/登录接口/健康检查/Agent 脚本与 Agent API（用令牌认证）
 _PUBLIC_PREFIXES = ('/agent/', '/api/agent/')
 _PUBLIC_PATHS = {'/login', '/api/login', '/api/health', '/favicon.ico'}
+
+# 登录防爆破：同一 IP 60 秒内失败 5 次 → 锁定 300 秒
+_FAIL_WINDOW = 60.0
+_FAIL_MAX = 5
+_login_fails = {}
+_lf_lock = threading.Lock()
+
+
+def _too_many_login_fails(ip):
+    now = time.time()
+    with _lf_lock:
+        recent = [t for t in _login_fails.get(ip, []) if now - t < _FAIL_WINDOW]
+        _login_fails[ip] = recent
+        return len(recent) >= _FAIL_MAX
+
+
+def _record_login_fail(ip):
+    with _lf_lock:
+        _login_fails.setdefault(ip, []).append(time.time())
+        if len(_login_fails[ip]) > 50:
+            _login_fails[ip] = _login_fails[ip][-50:]
+
+
+@app.after_request
+def security_headers(resp):
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    resp.headers['X-Frame-Options'] = 'DENY'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
 
 
 @app.before_request
@@ -50,11 +90,15 @@ def login_page():
 
 @app.post('/api/login')
 def api_login():
+    ip = request.remote_addr or '?'
+    if _too_many_login_fails(ip):
+        return jsonify({'error': '失败次数过多，请 5 分钟后再试'}), 429
     data = request.get_json(force=True, silent=True) or {}
     user, password = db.get_auth()
     ok = (secrets.compare_digest(str(data.get('user') or ''), user)
           and secrets.compare_digest(str(data.get('password') or ''), password))
     if not ok:
+        _record_login_fail(ip)
         return jsonify({'error': '用户名或密码错误'}), 401
     session.clear()
     session['user'] = user
@@ -94,17 +138,21 @@ def api_machine_get(mid):
 
 
 def _machine_fields(data):
-    def s(k, default=''):
+    def clean(k, maxlen, default=''):
         v = data.get(k)
-        return default if v is None else str(v).strip()
+        s = default if v is None else str(v)
+        # 过滤竖线/换行，避免破坏 Markdown 报告表格；并限制长度
+        s = re.sub(r'[|\r\n\t]+', ' ', s).strip()
+        return s[:maxlen]
 
-    name = s('name')
+    name = clean('name', 64)
     if not name:
         raise ValueError('名称不能为空')
-    role = s('role', 'backend')
+    role = clean('role', 16, 'backend')
     if role not in ('backend', 'target'):
         raise ValueError('角色无效')
-    return {'name': name, 'role': role, 'region': s('region'), 'bandwidth': s('bandwidth')}
+    return {'name': name, 'role': role,
+            'region': clean('region', 32), 'bandwidth': clean('bandwidth', 32)}
 
 
 @app.post('/api/machines')
@@ -164,10 +212,21 @@ def _agent_machine():
     return db.get_machine_by_token(request.headers.get('X-Agent-Token', ''))
 
 
+def _uninstall_cmd():
+    with open(os.path.join(AGENT_DIR, 'uninstall.sh'), encoding='utf-8') as f:
+        return f.read()
+
+
 @app.post('/api/agent/heartbeat')
 def agent_heartbeat():
     m = _agent_machine()
     if not m:
+        # 已删除机器的残留 Agent：返回一次性墓碑任务 = 卸载脚本，Agent 执行后自清理
+        if db.pop_tombstone(request.headers.get('X-Agent-Token', '')):
+            cmd_b64 = base64.b64encode(_uninstall_cmd().encode('utf-8')).decode('ascii')
+            body = ('status=ok\njob_id=tombstone-uninstall\ntimeout=60\n'
+                    f'cmd_b64={cmd_b64}\n')
+            return Response(body, mimetype='text/plain; charset=utf-8')
         return jsonify({'error': 'invalid token'}), 403
     m = db.touch_machine(m['id'], request.headers.get('X-Agent-Host', ''),
                          request.remote_addr or '')
@@ -273,4 +332,5 @@ def handle_value_error(e):
 
 if __name__ == '__main__':
     db.init_db()
-    app.run(host='0.0.0.0', port=8000, threaded=True)
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=8000, threads=8)

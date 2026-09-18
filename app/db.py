@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS run_items (
     machine_region TEXT NOT NULL DEFAULT '',
     machine_bandwidth TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'pending',
+    phase TEXT NOT NULL DEFAULT '',
     ping_raw TEXT NOT NULL DEFAULT '',
     up_raw TEXT NOT NULL DEFAULT '',
     down_raw TEXT NOT NULL DEFAULT '',
@@ -86,6 +87,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     started_at TEXT,
     finished_at TEXT
 );
+CREATE TABLE IF NOT EXISTS agent_tombstones (
+    token TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
 '''
 
 
@@ -98,6 +103,10 @@ def init_db():
             'DROP TABLE IF EXISTS run_items; DROP TABLE IF EXISTS jobs; '
             'DROP TABLE IF EXISTS runs; DROP TABLE IF EXISTS machines;')
     db.executescript(SCHEMA)
+    # 旧库补列/补表
+    cols_items = [r['name'] for r in db.execute('PRAGMA table_info(run_items)').fetchall()]
+    if cols_items and 'phase' not in cols_items:
+        db.execute("ALTER TABLE run_items ADD COLUMN phase TEXT NOT NULL DEFAULT ''")
     db.commit()
     mark_stale_runs()
     ensure_auth()
@@ -108,6 +117,11 @@ def mark_stale_runs():
     db.execute(
         "UPDATE runs SET status='failed', error='面板服务重启导致测试中断', "
         "finished_at=datetime('now','localtime') WHERE status IN ('running','pending')")
+    # 重启后没有任何测试应在运行，滞留的 agent 任务一并作废
+    db.execute(
+        "UPDATE jobs SET status='failed', exit_code=-1, output = output || ?, "
+        "finished_at=datetime('now','localtime') WHERE status IN ('queued','running')",
+        ('\n[面板] 面板重启，任务作废\n',))
     db.commit()
 
 
@@ -221,9 +235,26 @@ def touch_machine(mid, hostname, ip):
 
 
 def delete_machine(mid):
+    """删除机器；曾上线过的留下令牌墓碑，Agent 下次心跳时自动执行卸载脚本。"""
     db = get_db()
+    m = get_machine(mid)
+    if not m:
+        return
+    if m['last_seen']:
+        db.execute('INSERT OR REPLACE INTO agent_tombstones (token) VALUES (?)', (m['token'],))
     db.execute('DELETE FROM machines WHERE id=?', (mid,))
+    db.execute('DELETE FROM jobs WHERE machine_id=?', (mid,))
     db.commit()
+
+
+def pop_tombstone(token):
+    """取出一次性墓碑：命中则删除并返回 True，面板据此下发卸载脚本。"""
+    if not token:
+        return False
+    db = get_db()
+    cur = db.execute('DELETE FROM agent_tombstones WHERE token=?', (token,))
+    db.commit()
+    return cur.rowcount > 0
 
 
 # ---------------- runs ----------------
@@ -272,6 +303,22 @@ def update_run(rid, **fields):
 def finish_run(rid, status, report, log_text, error=''):
     update_run(rid, status=status, report=report, log=log_text, error=error,
                finished_at=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    prune_history()
+
+
+def prune_history(keep_runs=100):
+    """测试记录只保留最近 100 条；已完结任务与过期令牌墓碑一并清理。"""
+    db = get_db()
+    row = db.execute('SELECT id FROM runs ORDER BY id DESC LIMIT 1 OFFSET ?',
+                     (keep_runs - 1,)).fetchone()
+    if row:
+        cutoff = row['id']
+        db.execute('DELETE FROM run_items WHERE run_id <= ?', (cutoff,))
+        db.execute('DELETE FROM runs WHERE id <= ?', (cutoff,))
+    db.execute("DELETE FROM jobs WHERE status IN ('finished','failed') "
+               "AND created_at < datetime('now','-7 days')")
+    db.execute("DELETE FROM agent_tombstones WHERE created_at < datetime('now','-7 days')")
+    db.commit()
 
 
 def run_counts(rid):
@@ -302,7 +349,7 @@ def get_run_item(iid):
     return dict(r) if r else None
 
 
-_ITEM_COLS = {'status', 'ping_raw', 'up_raw', 'down_raw', 'metrics', 'error'}
+_ITEM_COLS = {'status', 'phase', 'ping_raw', 'up_raw', 'down_raw', 'metrics', 'error'}
 
 
 def update_item(iid, **fields):
@@ -351,8 +398,14 @@ def next_queued_job(machine_id):
     return get_job(r['id'])
 
 
+_JOB_OUTPUT_MAX_CHARS = 2_000_000
+
+
 def append_job_output(jid, text):
-    get_db().execute('UPDATE jobs SET output = output || ? WHERE id=?', (text, jid))
+    # 输出只保留末尾 2MB，防止异常任务把数据库撑爆（实时日志此前已流式转发）
+    get_db().execute(
+        'UPDATE jobs SET output = substr(output || ?, -?, ?) WHERE id=?',
+        (text, _JOB_OUTPUT_MAX_CHARS, _JOB_OUTPUT_MAX_CHARS, jid))
     get_db().commit()
 
 

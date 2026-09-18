@@ -4,6 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>iperf3-fleet 线路测试面板</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>"/>
 <style>
 :root{
   --bg:#0f172a; --card:#1e293b; --border:#334155; --text:#e2e8f0; --muted:#94a3b8;
@@ -63,6 +64,25 @@ summary{cursor:pointer;font-weight:600}
 .dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
 .dot.off{background:#64748b}
 #agentCmd{user-select:all;white-space:pre-wrap;word-break:break-all;font-size:12px}
+.tbl-wrap{overflow-x:auto}
+.rb{display:inline-block;padding:1px 9px;border-radius:99px;border:1px solid;font-size:12px;font-weight:600;white-space:nowrap}
+.rb.rating-s{color:var(--green);border-color:var(--green);background:rgba(74,222,128,.12)}
+.rb.rating-a{color:var(--lime);border-color:var(--lime);background:rgba(163,230,53,.12)}
+.rb.rating-b{color:var(--orange);border-color:var(--orange);background:rgba(251,146,60,.12)}
+.rb.rating-c{color:var(--red);border-color:var(--red);background:rgba(248,113,113,.12)}
+.log-line{white-space:pre-wrap;word-break:break-all}
+.log-ok{color:var(--green)}
+.log-bad{color:var(--red)}
+.log-hl{color:var(--accent);font-weight:600}
+.md-render{background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:16px;max-height:500px;overflow:auto;font-size:13px}
+.md-render h2{font-size:16px;margin:14px 0 8px;color:var(--text)}
+.md-render h3{font-size:14px;color:var(--text);margin:12px 0 6px}
+.md-render h4{font-size:13px;margin:10px 0 6px}
+.md-render p{margin:6px 0}
+.md-render blockquote{border-left:3px solid var(--accent);margin:8px 0;padding:2px 10px;color:var(--muted)}
+.md-render code{background:#1e293b;padding:1px 5px;border-radius:4px}
+.md-render pre{max-height:none;margin:8px 0}
+.md-table{margin:10px 0}
 </style>
 </head>
 <body>
@@ -80,10 +100,12 @@ summary{cursor:pointer;font-weight:600}
       <h2>机器管理</h2>
       <button data-action="openMachineForm">＋ 添加机器</button>
     </div>
+    <div class="tbl-wrap">
     <table>
       <thead><tr><th>状态</th><th>名称</th><th>角色</th><th>Agent IP</th><th>主机名</th><th>地区标记</th><th>带宽标记</th><th>操作</th></tr></thead>
       <tbody id="machinesBody"></tbody>
     </table>
+    </div>
     <p class="hint">「目标机器」是被测端（运行 iperf3 -s，建议只设一台）；「后端机器」是发起测试的一端。添加机器后复制接入命令到机器上以 root 执行，Agent 上线后即可测试。带宽/地区标记会显示在报告中并参与线路质量评价。</p>
   </section>
 
@@ -107,10 +129,12 @@ summary{cursor:pointer;font-weight:600}
       <h2>测试记录</h2>
       <button data-action="loadRuns">刷新</button>
     </div>
+    <div class="tbl-wrap">
     <table>
       <thead><tr><th>ID</th><th>目标机器</th><th>进度</th><th>状态</th><th>开始时间</th><th>操作</th></tr></thead>
       <tbody id="runsBody"></tbody>
     </table>
+    </div>
   </section>
 
   <section class="card hidden" id="runDetail">
@@ -123,9 +147,10 @@ summary{cursor:pointer;font-weight:600}
       </div>
     </div>
     <p class="muted" id="runDetailMeta" style="margin:4px 0"></p>
-    <h3>实时日志</h3>
+    <h3>实时日志 <label class="chk" style="display:inline-flex;margin-left:10px;font-weight:400"><input type="checkbox" id="autoScroll" checked> 自动滚动</label></h3>
     <pre id="logPre"></pre>
     <h3>结果汇总</h3>
+    <div class="tbl-wrap">
     <table>
       <thead><tr>
         <th>后端机器</th><th>地区</th><th>带宽</th><th>丢包率</th><th>RTT avg</th><th>抖动 mdev</th>
@@ -133,10 +158,12 @@ summary{cursor:pointer;font-weight:600}
       </tr></thead>
       <tbody id="detailTableBody"></tbody>
     </table>
+    </div>
     <h3>原始数据</h3>
     <div id="rawWrap"></div>
-    <h3>Markdown 报告</h3>
+    <h3>Markdown 报告 <button class="small" style="margin-left:10px" data-action="toggleReportView" id="reportToggleBtn">👁 渲染视图</button></h3>
     <pre id="reportPre" style="max-height:500px"></pre>
+    <div id="reportRender" class="md-render hidden"></div>
   </section>
 </main>
 
@@ -389,10 +416,11 @@ async function regenToken() {
 async function deleteMachine(id) {
   const m = MACHINES.find(x => x.id === Number(id));
   if (!m) return;
-  if (!confirm(`确定删除机器「${m.name}」？\n（机器上的 Agent 会因令牌失效而自动停摆，可用卸载脚本清理）`)) return;
+  if (!confirm(`确定删除机器「${m.name}」？\n面板会自动向它下发 Agent 卸载指令（在线机器下次心跳时执行）。`)) return;
   try {
     await api(`/api/machines/${id}`, {method: 'DELETE'});
     await loadMachines();
+    toast('已删除；卸载指令将在 Agent 下次心跳时自动执行');
   } catch (e) {
     alert('删除失败: ' + e.message);
   }
@@ -498,9 +526,18 @@ async function pollRun() {
     `目标: ${run.target_name} (${run.target_host}) · 开始: ${run.created_at}` +
     (run.finished_at ? ` · 结束: ${run.finished_at}` : '');
   const pre = $('logPre');
-  const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 60;
-  pre.textContent = (d.log || []).join('\n') || '（暂无日志）';
-  if (atBottom) pre.scrollTop = pre.scrollHeight;
+  const autoScroll = $('autoScroll') && $('autoScroll').checked;
+  const lines = d.log || [];
+  pre.innerHTML = lines.length
+    ? lines.map(l => {
+        const e = esc(l);
+        if (l.includes('✅')) return `<div class="log-line log-ok">${e}</div>`;
+        if (l.includes('❌') || l.includes('[致命错误]')) return `<div class="log-line log-bad">${e}</div>`;
+        if (l.includes('===')) return `<div class="log-line log-hl">${e}</div>`;
+        return `<div class="log-line">${e}</div>`;
+      }).join('')
+    : '（暂无日志）';
+  if (autoScroll) pre.scrollTop = pre.scrollHeight;
   renderRunDetail(d);
   return d;
 }
@@ -520,7 +557,14 @@ function renderRunDetail(d) {
         <td>${fmt(mt.up_mbits, ' Mbit/s')}</td>
         <td>${fmt(mt.down_mbits, ' Mbit/s')}</td>
         <td>${mt.retr_total ?? '—'}</td>
-        <td class="${ratingClass(mt.rating)}">${mt.rating}：${esc(mt.rating_detail || '')}</td>
+        <td><span class="rb ${ratingClass(mt.rating)}">${mt.rating}</span> <span class="muted">${esc(mt.rating_detail || '')}</span></td>
+      </tr>`;
+    }
+    if (it.status === 'running') {
+      return `<tr>
+        <td>${name}</td><td>${region}</td><td>${bw}</td>
+        <td colspan="6"><span class="badge running">⏳ ${esc(it.phase || '执行中')}…</span></td>
+        <td class="muted">等待完成</td>
       </tr>`;
     }
     return `<tr>
@@ -547,12 +591,73 @@ function renderRunDetail(d) {
 
   $('reportPre').textContent = d.run.report ||
     (d.run.status === 'running' ? '（测试结束后自动生成）' : '（无报告）');
+  $('reportRender').classList.add('hidden');
+  $('reportRender').innerHTML = '';
+  $('reportToggleBtn').textContent = '👁 渲染视图';
 }
 
 function copyReport() {
   const text = $('reportPre').textContent;
   if (!text || text.startsWith('（')) return alert('报告还未生成');
   copyText(text, '已复制 Markdown 报告');
+}
+
+/* --- 轻量 Markdown 渲染（先转义再转换，杜绝注入） --- */
+function mdInline(s) {
+  return esc(s)
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function mdFlushTable(rows) {
+  const parsed = rows
+    .map(r => r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim()))
+    .filter(cells => !cells.every(c => /^:?-{2,}:?$/.test(c) || c === ''));
+  if (!parsed.length) return '';
+  const head = parsed[0];
+  let h = '<table class="md-table"><thead><tr>' + head.map(c => '<th>' + mdInline(c) + '</th>').join('') + '</tr></thead><tbody>';
+  for (const row of parsed.slice(1)) h += '<tr>' + row.map(c => '<td>' + mdInline(c) + '</td>').join('') + '</tr>';
+  return h + '</tbody></table>';
+}
+
+function renderMarkdown(src) {
+  const parts = src.split('```');
+  let html = '';
+  let tableRows = [];
+  const flush = () => { const t = mdFlushTable(tableRows); tableRows = []; return t; };
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) {
+      html += '<pre>' + esc(parts[i].replace(/^\n/, '')) + '</pre>';
+      continue;
+    }
+    for (const line of parts[i].split('\n')) {
+      if (/^\s*\|.*\|\s*$/.test(line)) { tableRows.push(line); continue; }
+      if (tableRows.length) html += flush();
+      if (/^### /.test(line)) html += `<h4>${mdInline(line.slice(4))}</h4>`;
+      else if (/^## /.test(line)) html += `<h3>${mdInline(line.slice(3))}</h3>`;
+      else if (/^# /.test(line)) html += `<h2>${mdInline(line.slice(2))}</h2>`;
+      else if (/^- /.test(line)) html += `<p>• ${mdInline(line.slice(2))}</p>`;
+      else if (/^> /.test(line)) html += `<blockquote>${mdInline(line.replace(/^>\s?/, ''))}</blockquote>`;
+      else if (line.trim() === '') continue;
+      else html += `<p>${mdInline(line)}</p>`;
+    }
+  }
+  if (tableRows.length) html += flush();
+  return html;
+}
+
+function toggleReportView() {
+  const pre = $('reportPre'), div = $('reportRender'), btn = $('reportToggleBtn');
+  if (pre.classList.contains('hidden')) {
+    div.classList.add('hidden');
+    pre.classList.remove('hidden');
+    btn.textContent = '👁 渲染视图';
+    return;
+  }
+  div.innerHTML = renderMarkdown(pre.textContent);
+  div.classList.remove('hidden');
+  pre.classList.add('hidden');
+  btn.textContent = '📄 源码';
 }
 
 function downloadReport() {
@@ -601,6 +706,7 @@ const ACTIONS = {
   openRun: (d) => openRun(d.id),
   removeRun: (d) => removeRun(d.id),
   copyReport,
+  toggleReportView,
   downloadReport,
   stopCurrentRun,
 };

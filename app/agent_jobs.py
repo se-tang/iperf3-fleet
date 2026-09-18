@@ -76,3 +76,15 @@ fi
 '''.strip()
 
 SCRIPT_STOP_SERVER = 'pkill -x iperf3 2>/dev/null; echo IPERF3_SERVER_STOPPED'
+
+
+def script_check_port(ip):
+    """开始测速前先探测目标机 5201 端口（bash /dev/tcp，无需 nc），防火墙未放行时给出明确报错。"""
+    return (
+        "if timeout 4 bash -c 'exec 3<>/dev/tcp/{ip}/5201' 2>/dev/null; then\n"
+        "  echo PORT_5201_OK\n"
+        "else\n"
+        "  echo PORT_5201_BLOCKED\n"
+        "  exit 1\n"
+        "fi"
+    ).format(ip=ip)

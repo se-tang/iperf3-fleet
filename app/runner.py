@@ -190,7 +190,7 @@ def _worker(run_id, target):
 def _run_backend(st, log, stop_check, target, it):
     iid = it['id']
     name = it['machine_name']
-    db.update_item(iid, status='running')
+    db.update_item(iid, status='running', phase='检查环境')
     log(f"--- 后端 {name} ({it['machine_host']}) 开始 ---")
     try:
         m = db.get_machine(it['machine_id']) if it['machine_id'] else None
@@ -210,7 +210,13 @@ def _run_backend(st, log, stop_check, target, it):
 
         tq = target['agent_ip']
 
+        # 防火墙预检：5201 不通时给出明确提示，而不是等 iperf3 报晦涩错误
+        code, out = _job(m, aj.script_check_port(tq), 15, log, stop_check)
+        if code != 0:
+            raise RuntimeError(f'目标机 {tq} 的 5201/TCP 从本机不可达（请检查目标机防火墙是否放行 5201）')
+
         cmd_up = f'iperf3 -c {tq} -t 10'
+        db.update_item(iid, phase='上行测试')
         log(f'[{name}] $ {cmd_up}')
         code, up_raw = _job(m, cmd_up, 90, log, stop_check)
         if code != 0:
@@ -218,6 +224,7 @@ def _run_backend(st, log, stop_check, target, it):
         time.sleep(1)
 
         cmd_down = f'iperf3 -c {tq} -R -t 10'
+        db.update_item(iid, phase='下行测试')
         log(f'[{name}] $ {cmd_down}')
         code, down_raw = _job(m, cmd_down, 90, log, stop_check)
         if code != 0:
@@ -225,6 +232,7 @@ def _run_backend(st, log, stop_check, target, it):
         time.sleep(1)
 
         cmd_ping = f'ping -c 200 -i 1 {tq}'
+        db.update_item(iid, phase='ping 200次（约3分钟）')
         log(f'[{name}] $ {cmd_ping}  （约需 200 秒）')
         code, ping_raw = _job(m, cmd_ping, 300, log, stop_check)
         if 'packets transmitted' not in (ping_raw or ''):
@@ -232,7 +240,7 @@ def _run_backend(st, log, stop_check, target, it):
 
         metrics = quality.parse_metrics(ping_raw, up_raw, down_raw)
         quality.evaluate(metrics, it)
-        db.update_item(iid, status='done', ping_raw=ping_raw, up_raw=up_raw,
+        db.update_item(iid, status='done', phase='完成', ping_raw=ping_raw, up_raw=up_raw,
                        down_raw=down_raw,
                        metrics=json.dumps(metrics, ensure_ascii=False))
         log(f"[{name}] ✅ 完成 | 上行 {quality.fmt_num(metrics.get('up_mbits'))} Mbit/s "
