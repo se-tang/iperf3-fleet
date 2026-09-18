@@ -186,6 +186,7 @@ summary{cursor:pointer;font-weight:600}
         <div class="field"><label>地区标记（如 香港 / 洛杉矶）</label><input id="mRegion" placeholder="香港"/></div>
         <div class="field"><label>带宽标记（如 500M / 1G / 不限）</label><input id="mBandwidth" placeholder="500M"/></div>
       </div>
+      <p class="hint" id="mRoleHint"></p>
       <p class="hint">面板不保存任何 SSH 密码/密钥：保存后只需在机器上执行一条 Agent 接入命令即可纳入管理。</p>
       <div class="actions" style="justify-content:flex-end;margin-top:10px">
         <button data-action="closeModal">取消</button>
@@ -305,6 +306,12 @@ function renderMachines() {
     </tr>`).join('');
 }
 
+function updateRoleHint() {
+  $('mRoleHint').textContent = $('mRole').value === 'target'
+    ? '⚠️ 目标机器在测试时运行 iperf3 -s：请确保其他机器能访问它的 5201/TCP 端口并允许 ICMP。角色修改即时生效，Agent 无需任何改动。'
+    : '后端机器负责发起测试。角色修改即时生效，Agent 无需任何改动。';
+}
+
 function openMachineForm(m) {
   $('mFormTitle').textContent = m ? '编辑机器' : '添加机器';
   $('mId').value = m ? m.id : '';
@@ -312,6 +319,7 @@ function openMachineForm(m) {
   $('mRole').value = m ? m.role : 'backend';
   $('mRegion').value = m ? m.region : '';
   $('mBandwidth').value = m ? m.bandwidth : '';
+  updateRoleHint();
   $('mStepForm').classList.remove('hidden');
   $('mStepAgent').classList.add('hidden');
   stopAgentPoll();
@@ -732,6 +740,8 @@ document.addEventListener('keydown', e => {
 $('agentPanelUrl').addEventListener('input', () => {
   if (agentMachine) $('agentCmd').textContent = buildAgentCmd();
 });
+
+$('mRole').addEventListener('change', updateRoleHint);
 
 /* ---------------- 初始化 ---------------- */
 

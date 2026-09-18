@@ -33,6 +33,16 @@ docker compose up -d --build && sleep 5 && docker compose logs --tail 15 iperf3-
 - 面板带**登录验证**：首次启动自动生成随机密码（同时保存在 `./data/auth.json`，可修改该文件后 `docker compose restart` 生效；也可用环境变量 `PANEL_USER`/`PANEL_PASSWORD` 指定）。
 - 若修改了 compose 里的端口映射，请同步修改环境变量 `PANEL_PORT`，横幅里的地址才会正确。
 
+## 升级
+
+以后每次升级都是同一条指令（数据、机器接入关系、测试记录全部保留，机器上的 Agent 无需重装，面板重启后自动重连）：
+
+```bash
+cd ~/iperf3-fleet && git pull && docker compose up -d --build
+```
+
+若涉及数据库结构变化，面板启动时会自动迁移。想看启动状态加 `&& sleep 5 && docker compose logs --tail 15 iperf3-fleet`。
+
 ## 功能
 
 - **Agent 接入，零凭据存储**：添加机器只填名称/角色/地区/带宽，保存后面板给出一条接入命令，在机器上以 root 执行即完成接入；面板与机器之间由 Agent 主动外连（机器无需开放任何入站管理端口），令牌可随时重置。
