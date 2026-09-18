@@ -43,13 +43,16 @@ else
 fi
 '''.strip()
 
-# 每轮测试开始：清掉旧进程后启动 iperf3 -s
+# 每轮测试开始：清掉旧进程后启动 iperf3 -s（也用于通道内掉线自愈重启）
+# 用 PID 文件管理进程，不硬依赖 pgrep/pkill（后者仅作为残留进程的补充清扫）
 SCRIPT_START_SERVER = r'''
-pkill -x iperf3 2>/dev/null
+[ -f /tmp/iperf3-server.pid ] && kill "$(cat /tmp/iperf3-server.pid)" 2>/dev/null
+command -v pkill >/dev/null 2>&1 && pkill -f 'iperf3 -s' 2>/dev/null
 sleep 0.5
-(setsid nohup iperf3 -s > /tmp/iperf3-server.log 2>&1 &)
+nohup iperf3 -s > /tmp/iperf3-server.log 2>&1 &
+echo $! > /tmp/iperf3-server.pid
 sleep 1
-if pgrep -x iperf3 >/dev/null 2>&1; then
+if kill -0 "$(cat /tmp/iperf3-server.pid)" 2>/dev/null; then
   echo SERVER_STARTED
 else
   echo SERVER_FAILED
@@ -58,33 +61,26 @@ else
 fi
 '''.strip()
 
-# 每台后端测试前：确保目标机 server 存活（掉线自动重启）
-SCRIPT_ENSURE_SERVER = r'''
-if pgrep -x iperf3 >/dev/null 2>&1; then
-  echo ALREADY_RUNNING
-else
-  (setsid nohup iperf3 -s > /tmp/iperf3-server.log 2>&1 &)
-  sleep 1
-  if pgrep -x iperf3 >/dev/null 2>&1; then
-    echo SERVER_STARTED
-  else
-    echo SERVER_FAILED
-    cat /tmp/iperf3-server.log 2>/dev/null
-    exit 1
-  fi
-fi
+SCRIPT_STOP_SERVER = r'''
+[ -f /tmp/iperf3-server.pid ] && kill "$(cat /tmp/iperf3-server.pid)" 2>/dev/null
+command -v pkill >/dev/null 2>&1 && pkill -f 'iperf3 -s' 2>/dev/null
+echo IPERF3_SERVER_STOPPED
 '''.strip()
-
-SCRIPT_STOP_SERVER = 'pkill -x iperf3 2>/dev/null; echo IPERF3_SERVER_STOPPED'
 
 
 def script_check_port(ip):
-    """开始测速前先探测目标机 5201 端口（bash /dev/tcp，无需 nc），防火墙未放行时给出明确报错。"""
+    """探测目标机 5201 端口：优先 bash /dev/tcp（瞬时完成），不可用时回退 curl
+    （连接被拒=7 / 连接超时=28 视为不通，其余视为可达）。"""
     return (
-        "if timeout 4 bash -c 'exec 3<>/dev/tcp/{ip}/5201' 2>/dev/null; then\n"
-        "  echo PORT_5201_OK\n"
-        "else\n"
-        "  echo PORT_5201_BLOCKED\n"
-        "  exit 1\n"
-        "fi"
+        'target="{ip}"; port="5201"\n'
+        'probe() {{\n'
+        '  if timeout 4 bash -c "exec 3<>/dev/tcp/$target/$port" 2>/dev/null; then return 0; fi\n'
+        '  if command -v curl >/dev/null 2>&1; then\n'
+        '    curl -s -o /dev/null --connect-timeout 3 -m 4 "http://$target:$port/" >/dev/null 2>&1\n'
+        '    rc=$?\n'
+        '    [ "$rc" != "7" ] && [ "$rc" != "28" ] && return 0\n'
+        '  fi\n'
+        '  return 1\n'
+        '}}\n'
+        'if probe; then echo PORT_OK; else echo PORT_BLOCKED; exit 1; fi'
     ).format(ip=ip)

@@ -1,7 +1,8 @@
 """测试编排 v2：通过 Agent 任务队列远程执行（面板不再直连机器）。
 
-流程：目标机 agent 启动 iperf3 -s → 后端逐台串行执行 上/下行 iperf3 + ping，
-agent 心跳领取任务、流式回传输出，面板轮询任务状态汇总报告。
+流水线：iperf3 上/下行全局串行（多台同时测速会互相抢带宽，结果作废），
+ping 200 次不占测速通道，与后续机器的 iperf3 并行执行，充分利用等待时间。
+总时长 ≈ 环境准备 + 台数×25 秒 + 最后 200 秒。
 """
 import json
 import threading
@@ -36,6 +37,31 @@ class LineBuffer:
         if self.buf:
             self.cb(self.buf)
             self.buf = ''
+
+
+class Iperf3Lane:
+    """iperf3 测试串行通道：按机器顺序轮流占用，ping 阶段不占通道。"""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.turn = 0
+        self.stopped = False
+
+    def acquire(self, idx):
+        with self.cond:
+            while self.turn != idx and not self.stopped:
+                self.cond.wait(0.5)
+            return not self.stopped
+
+    def release(self):
+        with self.cond:
+            self.turn += 1
+            self.cond.notify_all()
+
+    def stop(self):
+        with self.cond:
+            self.stopped = True
+            self.cond.notify_all()
 
 
 def active_run_id():
@@ -126,6 +152,8 @@ def _worker(run_id, target):
         if st['stop']:
             raise RunAborted()
 
+    lane = None
+    threads = []
     status = 'finished'
     error = ''
     try:
@@ -138,12 +166,19 @@ def _worker(run_id, target):
         code, out = _job(target, aj.SCRIPT_START_SERVER, 30, log, stop_check)
         if code != 0:
             raise RuntimeError('目标机 iperf3 -s 启动失败: ' + (out or '').strip()[-300:])
-        log('[目标] iperf3 -s 已就绪，等待后端机器连接 (端口 5201)')
+        log('[目标] iperf3 -s 已就绪（端口 5201），开始流水线测试：iperf3 串行 / ping 并行')
 
         items = db.get_run_items(run_id)
-        for it in items:
-            stop_check()
-            _run_backend(st, log, stop_check, target, it)
+        lane = Iperf3Lane()
+        for idx, it in enumerate(items):
+            t = threading.Thread(target=_run_backend,
+                                 args=(lane, st, log, stop_check, target, it, idx),
+                                 daemon=True)
+            threads.append(t)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
         log('=== 全部后端测试结束，正在关闭目标机 iperf3 server ===')
         try:
@@ -154,14 +189,27 @@ def _worker(run_id, target):
         status = 'stopped'
         error = '用户手动停止测试'
         log('=== 测试被手动停止 ===')
+        if lane:
+            lane.stop()
+        for t in threads:
+            t.join(timeout=15)
         db.fail_open_items(run_id, '测试被手动停止')
     except Exception as e:
         status = 'failed'
         error = str(e) or e.__class__.__name__
         log(f'[致命错误] {error}')
         log(traceback.format_exc()[-800:])
+        if lane:
+            lane.stop()
+        for t in threads:
+            t.join(timeout=15)
         db.fail_open_items(run_id, '目标机异常，未执行')
     finally:
+        if lane:
+            lane.stop()
+        for t in threads:
+            t.join(timeout=15)
+
         run = db.get_run(run_id)
         items = db.get_run_items(run_id)
         db.cancel_queued_jobs([it['machine_id'] for it in items if it['machine_id']] +
@@ -187,11 +235,13 @@ def _worker(run_id, target):
             _active.pop(run_id, None)
 
 
-def _run_backend(st, log, stop_check, target, it):
+def _run_backend(lane, st, log, stop_check, target, it, idx):
+    """单台后端的流水线：环境检查（并行）→ 等通道 → iperf3 上/下行（串行）→ ping（并行）。"""
     iid = it['id']
     name = it['machine_name']
     db.update_item(iid, status='running', phase='检查环境')
     log(f"--- 后端 {name} ({it['machine_host']}) 开始 ---")
+    lane_passed = False
     try:
         m = db.get_machine(it['machine_id']) if it['machine_id'] else None
         if not m:
@@ -199,41 +249,52 @@ def _run_backend(st, log, stop_check, target, it):
         if not db.machine_online(m):
             raise RuntimeError('该机器 Agent 离线，无法执行测试')
 
+        # 环境检查与其他机器并行，互不干扰
         code, out = _job(m, aj.SCRIPT_ENSURE, 600, log, stop_check)
         if code != 0:
             raise RuntimeError('iperf3/ping 检查安装失败: ' + (out or '').strip()[-300:])
 
-        # 目标机 server 掉线（如上一轮异常）则自动重启
-        code, out = _job(target, aj.SCRIPT_ENSURE_SERVER, 30, log, stop_check)
-        if code != 0:
-            raise RuntimeError(f'目标机 iperf3 server 不可用: {(out or "").strip()[-200:]}')
-
         tq = target['agent_ip']
 
-        # 防火墙预检：5201 不通时给出明确提示，而不是等 iperf3 报晦涩错误
-        code, out = _job(m, aj.script_check_port(tq), 15, log, stop_check)
-        if code != 0:
-            raise RuntimeError(f'目标机 {tq} 的 5201/TCP 从本机不可达（请检查目标机防火墙是否放行 5201）')
+        # 等待 iperf3 通道（前一台的 iperf3 结束后立刻轮到本机，ping 不占通道）
+        db.update_item(iid, phase='等待 iperf3 通道')
+        if not lane.acquire(idx):
+            raise RunAborted()
+        lane_passed = True
+        try:
+            # 通道内先预检 5201；不通则尝试自动重启目标机 server（串行内重启，无竞争）
+            code, out = _job(m, aj.script_check_port(tq), 15, log, stop_check)
+            if code != 0:
+                log(f'[{name}] 5201 不通，尝试重启目标机 iperf3 server ...')
+                code2, out2 = _job(target, aj.SCRIPT_START_SERVER, 30, log, stop_check)
+                if code2 != 0:
+                    raise RuntimeError('目标机 iperf3 server 启动失败: ' + (out2 or '').strip()[-200:])
+                code, out = _job(m, aj.script_check_port(tq), 15, log, stop_check)
+                if code != 0:
+                    raise RuntimeError(f'目标机 {tq} 的 5201/TCP 从本机不可达（请检查目标机防火墙是否放行 5201）')
 
-        cmd_up = f'iperf3 -c {tq} -t 10'
-        db.update_item(iid, phase='上行测试')
-        log(f'[{name}] $ {cmd_up}')
-        code, up_raw = _job(m, cmd_up, 90, log, stop_check)
-        if code != 0:
-            raise RuntimeError('上行测试失败: ' + (up_raw or '').strip()[-200:])
+            cmd_up = f'iperf3 -c {tq} -t 10'
+            db.update_item(iid, phase='上行测试')
+            log(f'[{name}] $ {cmd_up}')
+            code, up_raw = _job(m, cmd_up, 90, log, stop_check)
+            if code != 0:
+                raise RuntimeError('上行测试失败: ' + (up_raw or '').strip()[-200:])
+            time.sleep(1)
+
+            cmd_down = f'iperf3 -c {tq} -R -t 10'
+            db.update_item(iid, phase='下行测试')
+            log(f'[{name}] $ {cmd_down}')
+            code, down_raw = _job(m, cmd_down, 90, log, stop_check)
+            if code != 0:
+                raise RuntimeError('下行测试失败: ' + (down_raw or '').strip()[-200:])
+        finally:
+            lane.release()  # 无论如何立刻让出通道，下一台马上开始 iperf3
         time.sleep(1)
 
-        cmd_down = f'iperf3 -c {tq} -R -t 10'
-        db.update_item(iid, phase='下行测试')
-        log(f'[{name}] $ {cmd_down}')
-        code, down_raw = _job(m, cmd_down, 90, log, stop_check)
-        if code != 0:
-            raise RuntimeError('下行测试失败: ' + (down_raw or '').strip()[-200:])
-        time.sleep(1)
-
+        # ping 不占通道，与后续机器的 iperf3 并行
         cmd_ping = f'ping -c 200 -i 1 {tq}'
         db.update_item(iid, phase='ping 200次（约3分钟）')
-        log(f'[{name}] $ {cmd_ping}  （约需 200 秒）')
+        log(f'[{name}] $ {cmd_ping}  （约需 200 秒，与其它机器的 iperf3 并行）')
         code, ping_raw = _job(m, cmd_ping, 300, log, stop_check)
         if 'packets transmitted' not in (ping_raw or ''):
             raise RuntimeError('ping 失败: ' + (ping_raw or '').strip()[-200:])
@@ -249,7 +310,12 @@ def _run_backend(st, log, stop_check, target, it):
             f"| 评价: {metrics.get('rating')}")
     except RunAborted:
         db.update_item(iid, status='failed', error='手动停止')
-        raise
+        log(f'[{name}] ⏹ 已停止')
     except Exception as e:
         db.update_item(iid, status='failed', error=str(e))
         log(f'[{name}] ❌ 失败: {e}')
+    finally:
+        if not lane_passed:
+            # 失败/中止也要把轮次让出去，避免阻塞后面的机器
+            if lane.acquire(idx):
+                lane.release()

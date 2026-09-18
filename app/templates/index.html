@@ -118,9 +118,10 @@ summary{cursor:pointer;font-weight:600}
     </div>
     <div class="row"><button class="primary" data-action="startRun">🚀 开始测试</button></div>
     <p class="hint">
-      流程：通过 Agent 自动检查/安装 iperf3 → 目标机启动 <code>iperf3 -s</code> → 每台后端依次执行
-      <code>iperf3 -c 目标 -t 10</code>、<code>iperf3 -c 目标 -R -t 10</code>、<code>ping -c 200 -i 1 目标</code>
-      （每台约 4 分钟，串行执行）。请确保目标机防火墙放行 <b>5201/TCP</b> 且允许 ICMP。
+      流程：通过 Agent 自动检查/安装 iperf3 → 目标机启动 <code>iperf3 -s</code> → 每台后端执行
+      <code>iperf3 -c 目标 -t 10</code>、<code>iperf3 -c 目标 -R -t 10</code>（iperf3 全局串行，结果互不干扰）→
+      <code>ping -c 200 -i 1 目标</code>（不占测速通道，与其它机器的 iperf3 并行）。总时长 ≈ 1 分钟 + 台数×25 秒 + 3.5 分钟。
+      请确保目标机防火墙放行 <b>5201/TCP</b> 且允许 ICMP（开始前会自动预检）。
     </p>
   </section>
 

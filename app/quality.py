@@ -225,7 +225,7 @@ def build_report(run, target, items):
         f"- **目标机器**：{target['name']}"
         f"（{target.get('region') or '地区未标记'} · {target.get('bandwidth') or '带宽未标记'} · `{target.get('host')}`）")
     lines.append(f"- **测试时间**：{run['created_at']} ~ {run.get('finished_at') or ''}")
-    lines.append('- **测试方式**：iperf3 单线程 10 秒 ×（上行 / 下行 -R）+ `ping -c 200 -i 1`，后端逐台串行执行')
+    lines.append('- **测试方式**：iperf3 单线程 10 秒 ×（上行 / 下行 -R）+ `ping -c 200 -i 1`；iperf3 全局串行，ping 与其它机器的 iperf3 并行')
     lines.append('')
     lines.append('| 后端机器 | 地区 | 带宽 | 丢包率 | RTT avg | 抖动 mdev | 上行 (sender) | 下行 (receiver) | 重传 | 线路质量评价 |')
     lines.append('|---|---|---|---|---|---|---|---|---|---|')
