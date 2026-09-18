@@ -77,10 +77,17 @@ rtt min/avg/max/mdev = 144.239/144.402/146.898/0.255 ms
 
 ## 一键卸载
 
-**卸载面板端**（在部署面板的机器上，进入代码目录执行）：
+**卸载面板端**（在部署面板的机器上；若已身处代码目录内，跳过第一行）：
 
 ```bash
-cd iperf3-fleet && docker compose down && rm -rf data && docker rmi iperf3-fleet:latest
+cd ~/iperf3-fleet
+docker compose down && rm -rf data && docker rmi iperf3-fleet:latest
+```
+
+连同代码目录一起删除：
+
+```bash
+cd ~ && rm -rf iperf3-fleet
 ```
 
 **卸载机器端 Agent**（在每台接入过的机器上执行；面板还在时最方便）：
