@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>iperf3 线路测试面板</title>
+<title>iperf3-fleet 线路测试面板</title>
 <style>
 :root{
   --bg:#0f172a; --card:#1e293b; --border:#334155; --text:#e2e8f0; --muted:#94a3b8;
@@ -47,7 +47,7 @@ pre{background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:
 .rating-b{color:var(--orange);font-weight:600}
 .rating-c{color:var(--red);font-weight:600}
 .modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:50}
-.modal{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;width:580px;max-width:94vw;max-height:92vh;overflow:auto}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px;width:620px;max-width:94vw;max-height:92vh;overflow:auto}
 .modal h3{margin:0 0 12px;color:var(--text);font-size:16px}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .grid2 label,.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:3px}
@@ -58,24 +58,32 @@ summary{cursor:pointer;font-weight:600}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#0284c7;color:#fff;padding:10px 18px;border-radius:8px;z-index:99;max-width:80vw;box-shadow:0 6px 20px rgba(0,0,0,.4)}
 .actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .chk{display:flex;align-items:center;gap:6px;font-size:13px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
+.dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+.dot.off{background:#64748b}
+#agentCmd{user-select:all;white-space:pre-wrap;word-break:break-all;font-size:12px}
 </style>
 </head>
 <body>
 <header>
-  <h1>📡 iperf3 线路测试面板</h1>
-  <span class="muted" style="font-size:12px">iperf3 单线程 10s ×上/下行 + ping 200 次 · 逐台串行</span>
+  <h1>📡 iperf3-fleet 线路测试面板</h1>
+  <div class="actions">
+    <span class="muted" style="font-size:12px">Agent 接入 · 无需 SSH 凭据</span>
+    <span id="meUser" class="muted" style="font-size:12px"></span>
+    <button class="small" data-action="logout">退出登录</button>
+  </div>
 </header>
 <main>
   <section class="card">
     <div class="card-head">
       <h2>机器管理</h2>
-      <button onclick="openMachineForm()">＋ 添加机器</button>
+      <button data-action="openMachineForm">＋ 添加机器</button>
     </div>
     <table>
-      <thead><tr><th>名称</th><th>角色</th><th>地址</th><th>SSH</th><th>带宽标记</th><th>地区标记</th><th>操作</th></tr></thead>
+      <thead><tr><th>状态</th><th>名称</th><th>角色</th><th>Agent IP</th><th>主机名</th><th>地区标记</th><th>带宽标记</th><th>操作</th></tr></thead>
       <tbody id="machinesBody"></tbody>
     </table>
-    <p class="hint">「目标机器」是被测端（运行 iperf3 -s，建议只设一台）；「后端机器」是发起测试的一端。带宽/地区标记会显示在测试报告里，并参与线路质量评价（对比标称带宽）。</p>
+    <p class="hint">「目标机器」是被测端（运行 iperf3 -s，建议只设一台）；「后端机器」是发起测试的一端。添加机器后复制接入命令到机器上以 root 执行，Agent 上线后即可测试。带宽/地区标记会显示在报告中并参与线路质量评价。</p>
   </section>
 
   <section class="card">
@@ -85,9 +93,9 @@ summary{cursor:pointer;font-weight:600}
       <b>后端机器：</b>
       <div id="backendList" style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:280px"></div>
     </div>
-    <div class="row"><button class="primary" onclick="startRun()">🚀 开始测试</button></div>
+    <div class="row"><button class="primary" data-action="startRun">🚀 开始测试</button></div>
     <p class="hint">
-      流程：自动检查/安装 iperf3 → 目标机启动 <code>iperf3 -s</code> → 每台后端依次执行
+      流程：通过 Agent 自动检查/安装 iperf3 → 目标机启动 <code>iperf3 -s</code> → 每台后端依次执行
       <code>iperf3 -c 目标 -t 10</code>、<code>iperf3 -c 目标 -R -t 10</code>、<code>ping -c 200 -i 1 目标</code>
       （每台约 4 分钟，串行执行）。请确保目标机防火墙放行 <b>5201/TCP</b> 且允许 ICMP。
     </p>
@@ -96,7 +104,7 @@ summary{cursor:pointer;font-weight:600}
   <section class="card">
     <div class="card-head">
       <h2>测试记录</h2>
-      <button onclick="loadRuns()">刷新</button>
+      <button data-action="loadRuns">刷新</button>
     </div>
     <table>
       <thead><tr><th>ID</th><th>目标机器</th><th>进度</th><th>状态</th><th>开始时间</th><th>操作</th></tr></thead>
@@ -108,9 +116,9 @@ summary{cursor:pointer;font-weight:600}
     <div class="card-head">
       <h2 id="runDetailTitle">测试</h2>
       <div class="actions">
-        <button class="small" onclick="copyReport()">📋 复制 Markdown 报告</button>
-        <button class="small" onclick="if(CURRENT_RUN)window.open('/api/runs/'+CURRENT_RUN+'/report')">⬇ 下载 .md</button>
-        <button class="small danger" onclick="stopCurrentRun()">⏹ 停止</button>
+        <button class="small" data-action="copyReport">📋 复制 Markdown 报告</button>
+        <button class="small" data-action="downloadReport">⬇ 下载 .md</button>
+        <button class="small danger" data-action="stopCurrentRun">⏹ 停止</button>
       </div>
     </div>
     <p class="muted" id="runDetailMeta" style="margin:4px 0"></p>
@@ -133,45 +141,45 @@ summary{cursor:pointer;font-weight:600}
 
 <div id="modal" class="modal-mask hidden">
   <div class="modal">
-    <h3 id="mFormTitle">添加机器</h3>
-    <input type="hidden" id="mId"/>
-    <div class="grid2">
-      <div class="field"><label>名称 *</label><input id="mName" placeholder="如：香港-01"/></div>
-      <div class="field"><label>角色 *</label>
-        <select id="mRole">
-          <option value="backend">后端机器（发起测试）</option>
-          <option value="target">目标机器（被测端 iperf3 -s）</option>
-        </select>
+    <!-- 第一步：机器信息 -->
+    <div id="mStepForm">
+      <h3 id="mFormTitle">添加机器</h3>
+      <input type="hidden" id="mId"/>
+      <div class="grid2">
+        <div class="field"><label>名称 *</label><input id="mName" placeholder="如：香港-01"/></div>
+        <div class="field"><label>角色 *</label>
+          <select id="mRole">
+            <option value="backend">后端机器（发起测试）</option>
+            <option value="target">目标机器（被测端 iperf3 -s）</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>地区标记（如 香港 / 洛杉矶）</label><input id="mRegion" placeholder="香港"/></div>
+        <div class="field"><label>带宽标记（如 500M / 1G / 不限）</label><input id="mBandwidth" placeholder="500M"/></div>
+      </div>
+      <p class="hint">面板不保存任何 SSH 密码/密钥：保存后只需在机器上执行一条 Agent 接入命令即可纳入管理。</p>
+      <div class="actions" style="justify-content:flex-end;margin-top:10px">
+        <button data-action="closeModal">取消</button>
+        <button class="primary" data-action="saveMachine">保存并生成接入命令</button>
       </div>
     </div>
-    <div class="grid2">
-      <div class="field"><label>IP / 主机名 *</label><input id="mHost" placeholder="1.2.3.4"/></div>
-      <div class="field"><label>SSH 端口</label><input id="mPort" value="22"/></div>
-    </div>
-    <div class="grid2">
-      <div class="field"><label>SSH 用户</label><input id="mUser" value="root"/></div>
-      <div class="field"><label>认证方式</label>
-        <select id="mAuth" onchange="toggleAuth()">
-          <option value="password">密码</option>
-          <option value="key">私钥</option>
-        </select>
+    <!-- 第二步：Agent 接入 -->
+    <div id="mStepAgent" class="hidden">
+      <h3>接入 Agent</h3>
+      <div class="field">
+        <label>面板地址（Agent 需能访问该地址，按需修改）</label>
+        <input id="agentPanelUrl"/>
       </div>
-    </div>
-    <div class="field" id="passwordWrap"><label>SSH 密码</label><input id="mPassword" type="password"/></div>
-    <div class="field hidden" id="keyWrap">
-      <label>SSH 私钥</label>
-      <textarea id="mKey" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
-      <label style="margin-top:6px">私钥口令（可选）</label>
-      <input id="mKeyPass" type="password"/>
-    </div>
-    <div class="grid2">
-      <div class="field"><label>带宽标记（如 500M / 1G / 不限）</label><input id="mBandwidth" placeholder="500M"/></div>
-      <div class="field"><label>地区标记（如 香港 / 洛杉矶）</label><input id="mRegion" placeholder="香港"/></div>
-    </div>
-    <p class="hint" id="mHint"></p>
-    <div class="actions" style="justify-content:flex-end;margin-top:10px">
-      <button onclick="closeModal()">取消</button>
-      <button class="primary" onclick="saveMachine()">保存</button>
+      <p class="hint">在机器上以 <b>root</b> 执行下面这条命令，执行完 Agent 会自动上线（无需开放机器任何入站端口）：</p>
+      <pre id="agentCmd"></pre>
+      <div class="actions">
+        <button data-action="copyAgentCmd">📋 复制命令</button>
+        <button data-action="regenToken" class="hidden" id="regenBtn">♻ 重置令牌</button>
+        <button class="primary hidden" data-action="closeModal" id="agentDoneBtn">✅ 已上线，完成</button>
+        <button data-action="closeModal" id="agentSkipBtn">稍后接入</button>
+      </div>
+      <p id="agentWait" class="hint">⏳ 等待 Agent 接入...</p>
     </div>
   </div>
 </div>
@@ -180,12 +188,19 @@ summary{cursor:pointer;font-weight:600}
 let MACHINES = [];
 let CURRENT_RUN = null;
 let pollTimer = null;
+let agentTimer = null;
+let agentMachine = null;
+let runFormInit = false;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {headers: {'Content-Type': 'application/json'}, ...opts});
+  if (res.status === 401 && !path.startsWith('/api/login')) {
+    location.href = '/login';
+    throw new Error('未登录');
+  }
   let data = null;
   try { data = await res.json(); } catch (e) {}
   if (!res.ok) throw new Error((data && data.error) || res.statusText);
@@ -206,12 +221,29 @@ function statusText(s) {
 
 function fmt(v, suffix) {
   if (v === null || v === undefined) return '—';
-  let s = Number(v).toFixed(1).replace(/\.0$/, '');
-  return s + (suffix || '');
+  return Number(v).toFixed(1).replace(/\.0$/, '') + (suffix || '');
 }
 
 function ratingClass(r) {
   return {'优秀': 'rating-s', '良好': 'rating-a', '一般': 'rating-b', '较差': 'rating-c'}[r] || '';
+}
+
+function copyText(text, tip) {
+  const done = () => toast(tip || '已复制');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => copyFallback(text, done));
+  } else {
+    copyFallback(text, done);
+  }
+}
+function copyFallback(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  ta.remove();
+  done();
 }
 
 /* ---------------- 机器管理 ---------------- */
@@ -225,97 +257,138 @@ async function loadMachines() {
 function renderMachines() {
   const tb = $('machinesBody');
   if (!MACHINES.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="muted">暂无机器，点击右上角「添加机器」开始</td></tr>';
+    tb.innerHTML = '<tr><td colspan="8" class="muted">暂无机器，点击右上角「添加机器」开始</td></tr>';
     return;
   }
   tb.innerHTML = MACHINES.map(m => `
     <tr>
+      <td><span class="dot ${m.online ? 'on' : 'off'}"></span>${m.online ? '在线' : '离线'}</td>
       <td><b>${esc(m.name)}</b></td>
       <td><span class="badge ${m.role}">${m.role === 'target' ? '目标' : '后端'}</span></td>
-      <td>${esc(m.host)}:${m.ssh_port}</td>
-      <td>${esc(m.ssh_user)} · ${m.auth_type === 'key' ? '密钥' : '密码'}</td>
-      <td>${esc(m.bandwidth) || '<span class="muted">—</span>'}</td>
+      <td>${esc(m.agent_ip) || '<span class="muted">未接入</span>'}</td>
+      <td>${esc(m.hostname) || '—'}</td>
       <td>${esc(m.region) || '<span class="muted">—</span>'}</td>
+      <td>${esc(m.bandwidth) || '<span class="muted">—</span>'}</td>
       <td class="actions">
-        <button class="small" onclick="checkMachine(${m.id})">测SSH</button>
-        <button class="small" onclick="editMachine(${m.id})">编辑</button>
-        <button class="small danger" onclick="deleteMachine(${m.id})">删除</button>
+        <button class="small" data-action="showAgentCmd" data-id="${m.id}">接入命令</button>
+        <button class="small" data-action="editMachine" data-id="${m.id}">编辑</button>
+        <button class="small danger" data-action="deleteMachine" data-id="${m.id}">删除</button>
       </td>
     </tr>`).join('');
-}
-
-async function checkMachine(id) {
-  toast('正在检测 SSH 连接...');
-  try {
-    const r = await api(`/api/machines/${id}/check`, {method: 'POST'});
-    if (r.ok && r.ssh && !r.iperf3) {
-      if (confirm(r.message + '\n\n是否立即自动安装 iperf3？')) {
-        toast('正在安装 iperf3（可能需要 1-2 分钟）...', 10000);
-        const ir = await api(`/api/machines/${id}/install`, {method: 'POST'});
-        alert(ir.message);
-      } else {
-        alert(r.message);
-      }
-    } else {
-      alert(r.message);
-    }
-  } catch (e) {
-    alert('检测失败: ' + e.message);
-  }
 }
 
 function openMachineForm(m) {
   $('mFormTitle').textContent = m ? '编辑机器' : '添加机器';
   $('mId').value = m ? m.id : '';
   $('mName').value = m ? m.name : '';
-  $('mHost').value = m ? m.host : '';
-  $('mPort').value = m ? m.ssh_port : 22;
-  $('mUser').value = m ? m.ssh_user : 'root';
-  $('mAuth').value = m ? m.auth_type : 'password';
-  $('mPassword').value = '';
-  $('mKey').value = '';
-  $('mKeyPass').value = '';
   $('mRole').value = m ? m.role : 'backend';
-  $('mBandwidth').value = m ? m.bandwidth : '';
   $('mRegion').value = m ? m.region : '';
-  $('mPassword').placeholder = m ? '留空则保持原密码' : '';
-  $('mKey').placeholder = m ? '留空则保持原私钥' : '-----BEGIN OPENSSH PRIVATE KEY-----';
-  $('mHint').textContent = m ? '认证信息留空表示保持不变' : '';
-  toggleAuth();
+  $('mBandwidth').value = m ? m.bandwidth : '';
+  $('mStepForm').classList.remove('hidden');
+  $('mStepAgent').classList.add('hidden');
+  stopAgentPoll();
   $('modal').classList.remove('hidden');
+  $('mName').focus();
 }
 
-function editMachine(id) { openMachineForm(MACHINES.find(x => x.id === id)); }
-function closeModal() { $('modal').classList.add('hidden'); }
+function buildAgentCmd() {
+  if (!agentMachine) return '';
+  let url = $('agentPanelUrl').value.trim().replace(/\/+$/, '');
+  if (url && !/^https?:\/\//.test(url)) url = 'http://' + url;
+  return `curl -fsSL ${url}/agent/install.sh | bash -s -- ${url} ${agentMachine.token}`;
+}
 
-function toggleAuth() {
-  const isKey = $('mAuth').value === 'key';
-  $('passwordWrap').classList.toggle('hidden', isKey);
-  $('keyWrap').classList.toggle('hidden', !isKey);
+function showAgentStep(m) {
+  agentMachine = m;
+  $('mStepForm').classList.add('hidden');
+  $('mStepAgent').classList.remove('hidden');
+  $('agentDoneBtn').classList.add('hidden');
+  $('regenBtn').classList.remove('hidden');
+  $('agentWait').textContent = '⏳ 等待 Agent 接入...（在机器上执行上方命令后约 3 秒上线）';
+  if (!$('agentPanelUrl').value.trim()) $('agentPanelUrl').value = location.origin;
+  $('agentCmd').textContent = buildAgentCmd();
+  stopAgentPoll();
+  agentTimer = setInterval(pollAgent, 2000);
+  pollAgent();
+}
+
+function stopAgentPoll() {
+  clearInterval(agentTimer);
+  agentTimer = null;
+  agentMachine = null;
+}
+
+async function pollAgent() {
+  if (!agentMachine) return;
+  let m;
+  try { m = await api(`/api/machines/${agentMachine.id}`); } catch (e) { return; }
+  if (m.online) {
+    $('agentWait').innerHTML = `<span style="color:var(--green)">✅ Agent 已上线（${esc(m.agent_ip || '')} ${esc(m.hostname || '')}）</span>`;
+    $('agentDoneBtn').classList.remove('hidden');
+    stopAgentPollKeepMachine();
+    loadMachines();
+  }
+}
+function stopAgentPollKeepMachine() {
+  clearInterval(agentTimer);
+  agentTimer = null;
+}
+
+function editMachine(id) { openMachineForm(MACHINES.find(x => x.id === Number(id))); }
+
+function showAgentCmd(id) {
+  const m = MACHINES.find(x => x.id === Number(id));
+  if (!m) return;
+  $('mStepForm').classList.add('hidden');
+  $('mStepAgent').classList.remove('hidden');
+  $('modal').classList.remove('hidden');
+  showAgentStep(m);
+}
+
+function closeModal() {
+  $('modal').classList.add('hidden');
+  stopAgentPoll();
 }
 
 async function saveMachine() {
   const body = {
-    name: $('mName').value, host: $('mHost').value, ssh_port: $('mPort').value,
-    ssh_user: $('mUser').value, auth_type: $('mAuth').value,
-    password: $('mPassword').value, private_key: $('mKey').value, key_passphrase: $('mKeyPass').value,
-    role: $('mRole').value, bandwidth: $('mBandwidth').value, region: $('mRegion').value,
+    name: $('mName').value, role: $('mRole').value,
+    region: $('mRegion').value, bandwidth: $('mBandwidth').value,
   };
   const id = $('mId').value;
   try {
-    if (id) await api(`/api/machines/${id}`, {method: 'PUT', body: JSON.stringify(body)});
-    else await api('/api/machines', {method: 'POST', body: JSON.stringify(body)});
-    closeModal();
-    await loadMachines();
-    toast('已保存');
+    if (id) {
+      await api(`/api/machines/${id}`, {method: 'PUT', body: JSON.stringify(body)});
+      closeModal();
+      await loadMachines();
+      toast('已保存');
+    } else {
+      const m = await api('/api/machines', {method: 'POST', body: JSON.stringify(body)});
+      await loadMachines();
+      showAgentStep(m);
+    }
   } catch (e) {
     alert('保存失败: ' + e.message);
   }
 }
 
+async function regenToken() {
+  if (!agentMachine) return;
+  if (!confirm('重置令牌后，旧的接入命令立即失效，需要重新复制新命令。确定？')) return;
+  try {
+    agentMachine = await api(`/api/machines/${agentMachine.id}/regen-token`, {method: 'POST'});
+    $('agentCmd').textContent = buildAgentCmd();
+    $('agentWait').textContent = '⏳ 令牌已重置，请复制新命令在机器上重新执行。';
+    toast('令牌已重置');
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
 async function deleteMachine(id) {
-  const m = MACHINES.find(x => x.id === id);
-  if (!confirm(`确定删除机器「${m.name}」？`)) return;
+  const m = MACHINES.find(x => x.id === Number(id));
+  if (!m) return;
+  if (!confirm(`确定删除机器「${m.name}」？\n（机器上的 Agent 会因令牌失效而自动停摆，可用卸载脚本清理）`)) return;
   try {
     await api(`/api/machines/${id}`, {method: 'DELETE'});
     await loadMachines();
@@ -324,23 +397,39 @@ async function deleteMachine(id) {
   }
 }
 
+async function logout() {
+  try { await api('/api/logout', {method: 'POST'}); } catch (e) {}
+  location.href = '/login';
+}
+
 /* ---------------- 发起测试 ---------------- */
 
 function renderRunForm() {
   const targets = MACHINES.filter(m => m.role === 'target');
   const backends = MACHINES.filter(m => m.role === 'backend');
+  const prevTarget = $('targetSelect').value;
+  const prevChecked = runFormInit
+    ? new Set([...document.querySelectorAll('#backendList input:checked')].map(x => x.value))
+    : null;
   $('targetSelect').innerHTML = targets.length
-    ? targets.map(m => `<option value="${m.id}">${esc(m.name)}（${esc(m.host)} · ${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}）</option>`).join('')
-    : '<option value="">— 请先在机器管理中把某台机器的角色设为「目标」—</option>';
+    ? targets.map(m => `<option value="${m.id}">${esc(m.name)}（${esc(m.agent_ip) || '未接入'} · ${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}）</option>`).join('')
+    : '<option value="">— 请先添加一台角色为「目标」的机器 —</option>';
   $('backendList').innerHTML = backends.length
-    ? backends.map(m => `<label class="chk"><input type="checkbox" value="${m.id}" checked> ${esc(m.name)} <span class="muted">(${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'})</span></label>`).join('')
+    ? backends.map(m => `<label class="chk"><input type="checkbox" value="${m.id}"> ${esc(m.name)} <span class="muted">(${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'})</span></label>`).join('')
     : '<span class="muted">暂无后端机器</span>';
+  if (runFormInit) {
+    if ([...$('targetSelect').options].some(o => o.value === prevTarget)) $('targetSelect').value = prevTarget;
+    document.querySelectorAll('#backendList input').forEach(cb => { cb.checked = prevChecked.has(cb.value); });
+  } else {
+    document.querySelectorAll('#backendList input').forEach(cb => { cb.checked = true; });
+  }
+  runFormInit = true;
 }
 
 async function startRun() {
   const target_id = parseInt($('targetSelect').value, 10);
   const backend_ids = [...document.querySelectorAll('#backendList input:checked')].map(x => parseInt(x.value, 10));
-  if (!target_id) return alert('请先在机器管理中把某台机器的角色设为「目标」');
+  if (!target_id) return alert('请先添加一台角色为「目标」的机器并接入 Agent');
   if (!backend_ids.length) return alert('请至少勾选一台后端机器');
   if (!confirm('将对目标机器逐台执行：iperf3 上/下行各 10 秒 + ping 200 次（每台约 4 分钟）。\n确认开始？')) return;
   try {
@@ -370,14 +459,14 @@ async function loadRuns() {
       <td><span class="badge ${r.status}">${statusText(r.status)}</span></td>
       <td class="muted">${r.created_at}</td>
       <td class="actions">
-        <button class="small" onclick="openRun(${r.id})">查看</button>
-        <button class="small danger" onclick="removeRun(${r.id})">删除</button>
+        <button class="small" data-action="openRun" data-id="${r.id}">查看</button>
+        <button class="small danger" data-action="removeRun" data-id="${r.id}">删除</button>
       </td>
     </tr>`).join('');
 }
 
 function openRun(id) {
-  CURRENT_RUN = id;
+  CURRENT_RUN = Number(id);
   $('runDetail').classList.remove('hidden');
   $('runDetail').scrollIntoView({behavior: 'smooth'});
   clearTimeout(pollTimer);
@@ -459,21 +548,14 @@ function renderRunDetail(d) {
     (d.run.status === 'running' ? '（测试结束后自动生成）' : '（无报告）');
 }
 
-async function copyReport() {
+function copyReport() {
   const text = $('reportPre').textContent;
   if (!text || text.startsWith('（')) return alert('报告还未生成');
-  try {
-    await navigator.clipboard.writeText(text);
-    toast('已复制 Markdown 报告');
-  } catch (e) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    ta.remove();
-    toast('已复制 Markdown 报告');
-  }
+  copyText(text, '已复制 Markdown 报告');
+}
+
+function downloadReport() {
+  if (CURRENT_RUN) window.open(`/api/runs/${CURRENT_RUN}/report`);
 }
 
 async function stopCurrentRun() {
@@ -491,7 +573,7 @@ async function removeRun(id) {
   if (!confirm('确定删除该测试记录？')) return;
   try {
     await api(`/api/runs/${id}`, {method: 'DELETE'});
-    if (CURRENT_RUN === id) {
+    if (CURRENT_RUN === Number(id)) {
       CURRENT_RUN = null;
       $('runDetail').classList.add('hidden');
     }
@@ -501,16 +583,67 @@ async function removeRun(id) {
   }
 }
 
+/* ---------------- 事件委托（所有按钮统一走这里，弹窗取消/关闭稳定可用） ---------------- */
+
+const ACTIONS = {
+  openMachineForm: () => openMachineForm(),
+  closeModal,
+  saveMachine,
+  showAgentCmd: (d) => showAgentCmd(d.id),
+  editMachine: (d) => editMachine(d.id),
+  deleteMachine: (d) => deleteMachine(d.id),
+  regenToken,
+  copyAgentCmd: () => copyText($('agentCmd').textContent, '已复制接入命令'),
+  logout,
+  startRun,
+  loadRuns: () => loadRuns(),
+  openRun: (d) => openRun(d.id),
+  removeRun: (d) => removeRun(d.id),
+  copyReport,
+  downloadReport,
+  stopCurrentRun,
+};
+
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const fn = ACTIONS[el.dataset.action];
+  if (fn) {
+    e.preventDefault();
+    fn(el.dataset);
+  }
+});
+
+// 点击遮罩空白处或按 ESC 也可关闭弹窗
+$('modal').addEventListener('click', e => {
+  if (e.target === $('modal')) closeModal();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$('modal').classList.contains('hidden')) closeModal();
+});
+
+$('agentPanelUrl').addEventListener('input', () => {
+  if (agentMachine) $('agentCmd').textContent = buildAgentCmd();
+});
+
 /* ---------------- 初始化 ---------------- */
 
 async function init() {
   try {
+    const me = await api('/api/me');
+    $('meUser').textContent = me.user ? `👤 ${me.user}` : '';
     await loadMachines();
     await loadRuns();
     const st = await api('/api/status');
     if (st.active_run_id) openRun(st.active_run_id);
+    // 定时刷新机器在线状态（弹窗打开时暂停，避免打断接入流程）
+    setInterval(async () => {
+      if ($('modal').classList.contains('hidden')) {
+        try { await loadMachines(); } catch (e) {}
+      }
+    }, 8000);
   } catch (e) {
-    alert('面板初始化失败: ' + e.message);
+    if (e.message !== '未登录') alert('面板初始化失败: ' + e.message);
   }
 }
 init();

@@ -9,5 +9,7 @@ services:
     environment:
       TZ: Asia/Shanghai
       DATA_DIR: /data
+      # 横幅里显示的对外端口，若修改上面的端口映射请同步修改这里
+      PANEL_PORT: 8088
     volumes:
       - ./data:/data

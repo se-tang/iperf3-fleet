@@ -1,10 +1,11 @@
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    PANEL_PORT=8080
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata \
+    && apt-get install -y --no-install-recommends tzdata curl \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 
@@ -12,9 +13,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
+COPY entrypoint.sh banner.py ./
+RUN chmod +x /app/entrypoint.sh
 
 ENV DATA_DIR=/data
 VOLUME /data
 EXPOSE 8000
 
-CMD ["python", "-m", "app.app"]
+ENTRYPOINT ["/app/entrypoint.sh"]

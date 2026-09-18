@@ -1,8 +1,11 @@
-"""SQLite 数据层：机器、测试任务、测试结果。"""
+"""SQLite 数据层 v2：机器（Agent 令牌接入）、任务队列、面板登录凭据。"""
 import datetime
+import json
 import os
+import secrets
 import sqlite3
 import threading
+import time
 
 _DATA_DIR = os.environ.get('DATA_DIR')
 if not _DATA_DIR:
@@ -10,6 +13,11 @@ if not _DATA_DIR:
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
 os.makedirs(_DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(_DATA_DIR, 'panel.db')
+AUTH_PATH = os.path.join(_DATA_DIR, 'auth.json')
+SECRET_PATH = os.path.join(_DATA_DIR, 'secret_key')
+
+# agent 心跳在该秒数内视为在线
+ONLINE_WINDOW = 25
 
 _local = threading.local()
 
@@ -24,21 +32,17 @@ def get_db():
     return conn
 
 
-def init_db():
-    get_db().executescript('''
+SCHEMA = '''
 CREATE TABLE IF NOT EXISTS machines (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    host TEXT NOT NULL,
-    ssh_port INTEGER NOT NULL DEFAULT 22,
-    ssh_user TEXT NOT NULL DEFAULT 'root',
-    auth_type TEXT NOT NULL DEFAULT 'password',
-    password TEXT NOT NULL DEFAULT '',
-    private_key TEXT NOT NULL DEFAULT '',
-    key_passphrase TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL DEFAULT 'backend',
-    bandwidth TEXT NOT NULL DEFAULT '',
     region TEXT NOT NULL DEFAULT '',
+    bandwidth TEXT NOT NULL DEFAULT '',
+    token TEXT NOT NULL DEFAULT '',
+    hostname TEXT NOT NULL DEFAULT '',
+    agent_ip TEXT NOT NULL DEFAULT '',
+    last_seen INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE TABLE IF NOT EXISTS runs (
@@ -70,13 +74,36 @@ CREATE TABLE IF NOT EXISTS run_items (
     metrics TEXT NOT NULL DEFAULT '',
     error TEXT NOT NULL DEFAULT ''
 );
-''')
-    get_db().commit()
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    machine_id INTEGER NOT NULL,
+    cmd TEXT NOT NULL,
+    timeout INTEGER NOT NULL DEFAULT 120,
+    status TEXT NOT NULL DEFAULT 'queued',
+    output TEXT NOT NULL DEFAULT '',
+    exit_code INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    started_at TEXT,
+    finished_at TEXT
+);
+'''
+
+
+def init_db():
+    db = get_db()
+    # 旧版 SSH 凭据表结构 → 直接重建（v2 起不再保存任何 SSH 信息）
+    cols = [r['name'] for r in db.execute('PRAGMA table_info(machines)').fetchall()]
+    if cols and 'token' not in cols:
+        db.executescript(
+            'DROP TABLE IF EXISTS run_items; DROP TABLE IF EXISTS jobs; '
+            'DROP TABLE IF EXISTS runs; DROP TABLE IF EXISTS machines;')
+    db.executescript(SCHEMA)
+    db.commit()
     mark_stale_runs()
+    ensure_auth()
 
 
 def mark_stale_runs():
-    """服务重启后，把中断的任务标记为失败。"""
     db = get_db()
     db.execute(
         "UPDATE runs SET status='failed', error='面板服务重启导致测试中断', "
@@ -84,39 +111,111 @@ def mark_stale_runs():
     db.commit()
 
 
+# ---------------- 登录凭据 ----------------
+
+def ensure_auth():
+    """首次启动生成随机密码写入 auth.json；可用环境变量 PANEL_USER/PANEL_PASSWORD 覆盖。"""
+    env_user = os.environ.get('PANEL_USER')
+    env_pw = os.environ.get('PANEL_PASSWORD')
+    if os.path.exists(AUTH_PATH) and not env_user and not env_pw:
+        return
+    user = env_user or 'admin'
+    pw = env_pw or ('fleet-' + secrets.token_hex(4))
+    with open(AUTH_PATH, 'w', encoding='utf-8') as f:
+        json.dump({'user': user, 'password': pw}, f, ensure_ascii=False)
+    try:
+        os.chmod(AUTH_PATH, 0o600)
+    except OSError:
+        pass
+
+
+def get_auth():
+    try:
+        with open(AUTH_PATH, encoding='utf-8') as f:
+            d = json.load(f)
+        return str(d.get('user') or 'admin'), str(d.get('password') or '')
+    except Exception:
+        return 'admin', ''
+
+
+def get_secret_key():
+    if not os.path.exists(SECRET_PATH):
+        with open(SECRET_PATH, 'w') as f:
+            f.write(secrets.token_hex(32))
+    with open(SECRET_PATH) as f:
+        return f.read().strip()
+
+
 # ---------------- machines ----------------
+
+def machine_online(m):
+    if not m:
+        return False
+    return bool(m.get('last_seen')) and (time.time() - m['last_seen']) <= ONLINE_WINDOW
+
+
+def _row_online(m):
+    return machine_online(m)
+
 
 def get_machines():
     rows = get_db().execute('SELECT * FROM machines ORDER BY id').fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        m = dict(r)
+        m['online'] = _row_online(m)
+        out.append(m)
+    return out
 
 
 def get_machine(mid):
     r = get_db().execute('SELECT * FROM machines WHERE id=?', (mid,)).fetchone()
-    return dict(r) if r else None
+    if not r:
+        return None
+    m = dict(r)
+    m['online'] = _row_online(m)
+    return m
+
+
+def get_machine_by_token(token):
+    if not token:
+        return None
+    r = get_db().execute('SELECT * FROM machines WHERE token=?', (token,)).fetchone()
+    if not r:
+        return None
+    m = dict(r)
+    m['online'] = _row_online(m)
+    return m
 
 
 def create_machine(f):
     db = get_db()
     cur = db.execute(
-        'INSERT INTO machines (name, host, ssh_port, ssh_user, auth_type, password, '
-        'private_key, key_passphrase, role, bandwidth, region) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-        (f['name'], f['host'], f['ssh_port'], f['ssh_user'], f['auth_type'],
-         f['password'], f['private_key'], f['key_passphrase'],
-         f['role'], f['bandwidth'], f['region']))
+        'INSERT INTO machines (name, role, region, bandwidth, token) VALUES (?,?,?,?,?)',
+        (f['name'], f['role'], f['region'], f['bandwidth'], secrets.token_hex(16)))
     db.commit()
     return get_machine(cur.lastrowid)
 
 
 def update_machine(mid, f):
     db = get_db()
-    db.execute(
-        'UPDATE machines SET name=?, host=?, ssh_port=?, ssh_user=?, auth_type=?, '
-        'password=?, private_key=?, key_passphrase=?, role=?, bandwidth=?, region=? WHERE id=?',
-        (f['name'], f['host'], f['ssh_port'], f['ssh_user'], f['auth_type'],
-         f['password'], f['private_key'], f['key_passphrase'],
-         f['role'], f['bandwidth'], f['region'], mid))
+    db.execute('UPDATE machines SET name=?, role=?, region=?, bandwidth=? WHERE id=?',
+               (f['name'], f['role'], f['region'], f['bandwidth'], mid))
+    db.commit()
+    return get_machine(mid)
+
+
+def regen_token(mid):
+    db = get_db()
+    db.execute('UPDATE machines SET token=? WHERE id=?', (secrets.token_hex(16), mid))
+    db.commit()
+    return get_machine(mid)
+
+
+def touch_machine(mid, hostname, ip):
+    db = get_db()
+    db.execute('UPDATE machines SET last_seen=?, hostname=?, agent_ip=? WHERE id=?',
+               (int(time.time()), hostname or '', ip or '', mid))
     db.commit()
     return get_machine(mid)
 
@@ -134,14 +233,16 @@ def create_run(target, backend_ids):
     cur = db.execute(
         'INSERT INTO runs (target_id, target_name, target_host, target_region, target_bandwidth) '
         'VALUES (?,?,?,?,?)',
-        (target['id'], target['name'], target['host'], target['region'], target['bandwidth']))
+        (target['id'], target['name'], target['agent_ip'] or 'IP待agent上报',
+         target['region'], target['bandwidth']))
     run_id = cur.lastrowid
     for bid in backend_ids:
         m = get_machine(bid)
         db.execute(
             'INSERT INTO run_items (run_id, machine_id, machine_name, machine_host, '
             'machine_region, machine_bandwidth) VALUES (?,?,?,?,?,?)',
-            (run_id, m['id'], m['name'], m['host'], m['region'], m['bandwidth']))
+            (run_id, m['id'], m['name'], m['agent_ip'] or 'IP待agent上报',
+             m['region'], m['bandwidth']))
     db.commit()
     return run_id
 
@@ -217,4 +318,68 @@ def fail_open_items(rid, error):
     get_db().execute(
         "UPDATE run_items SET status='failed', error=? WHERE run_id=? AND status IN ('pending','running')",
         (error, rid))
+    get_db().commit()
+
+
+# ---------------- agent 任务队列 ----------------
+
+def create_job(machine_id, cmd, timeout):
+    db = get_db()
+    cur = db.execute(
+        'INSERT INTO jobs (machine_id, cmd, timeout) VALUES (?,?,?)',
+        (machine_id, cmd, int(timeout)))
+    db.commit()
+    return cur.lastrowid
+
+
+def get_job(jid):
+    r = get_db().execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone()
+    return dict(r) if r else None
+
+
+def next_queued_job(machine_id):
+    """领取最早排队的任务：置为 running 并记录领取时间。"""
+    db = get_db()
+    r = db.execute(
+        "SELECT * FROM jobs WHERE machine_id=? AND status='queued' ORDER BY id LIMIT 1",
+        (machine_id,)).fetchone()
+    if not r:
+        return None
+    db.execute("UPDATE jobs SET status='running', started_at=datetime('now','localtime') WHERE id=?",
+               (r['id'],))
+    db.commit()
+    return get_job(r['id'])
+
+
+def append_job_output(jid, text):
+    get_db().execute('UPDATE jobs SET output = output || ? WHERE id=?', (text, jid))
+    get_db().commit()
+
+
+def finish_job(jid, exit_code):
+    db = get_db()
+    db.execute(
+        "UPDATE jobs SET status=?, exit_code=?, finished_at=datetime('now','localtime') WHERE id=?",
+        ('finished' if exit_code == 0 else 'failed', exit_code, jid))
+    db.commit()
+
+
+def fail_job(jid, reason):
+    db = get_db()
+    db.execute(
+        "UPDATE jobs SET status='failed', exit_code=-1, output = output || ?, "
+        "finished_at=datetime('now','localtime') WHERE id=?",
+        (f'\n[面板] {reason}\n', jid))
+    db.commit()
+
+
+def cancel_queued_jobs(machine_ids):
+    """把某些机器仍排队的旧任务作废（新任务开始前清理/停止时）。"""
+    if not machine_ids:
+        return
+    marks = ','.join('?' * len(machine_ids))
+    get_db().execute(
+        f"UPDATE jobs SET status='failed', exit_code=-1, output = output || ? "
+        f'WHERE status=\'queued\' AND machine_id IN ({marks})',
+        ('[面板] 任务已取消\n', *machine_ids))
     get_db().commit()
