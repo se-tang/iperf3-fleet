@@ -1,8 +1,8 @@
 services:
-  iperf3-panel:
+  iperf3-fleet:
     build: .
-    image: iperf3-panel:latest
-    container_name: iperf3-panel
+    image: iperf3-fleet:latest
+    container_name: iperf3-fleet
     restart: unless-stopped
     ports:
       - "8088:8000"

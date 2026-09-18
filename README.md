@@ -19,7 +19,8 @@
 ## 快速开始
 
 ```bash
-cd iperf3-panel
+git clone https://github.com/se-tang/iperf3-fleet.git
+cd iperf3-fleet
 docker compose up -d --build
 ```
 
@@ -68,7 +69,7 @@ rtt min/avg/max/mdev = 144.239/144.402/146.898/0.255 ms
 ## 项目结构
 
 ```
-iperf3-panel/
+iperf3-fleet/
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt

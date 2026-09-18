@@ -4,7 +4,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ['DATA_DIR'] = tempfile.mkdtemp(prefix='iperf3-panel-test-')
+os.environ['DATA_DIR'] = tempfile.mkdtemp(prefix='iperf3-fleet-test-')
 
 from app import quality  # noqa: E402
 
