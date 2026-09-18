@@ -4,19 +4,11 @@
 
 ## 一键部署（复制即用）
 
-**方式一：git 克隆** —— 下面整行复制到你的服务器终端执行即可（`git clone` 会自动创建目录；首次部署会随机生成面板端口并记录在 `.env`）：
+下面整行复制到你的服务器终端执行即可（`git clone` 会自动创建目录；首次部署会随机生成面板端口并记录在 `.env`）：
 
 ```bash
 git clone https://github.com/se-tang/iperf3-fleet.git && cd iperf3-fleet && ([ -f .env ] || echo "PANEL_PORT=$(shuf -i 10000-30000 -n 1)" > .env) && docker compose up -d --build && sleep 5 && docker compose logs --tail 15 iperf3-fleet
 ```
-
-**方式二：网页下载 ZIP** —— 仓库页面右上角 **Code → Download ZIP**，把压缩包传到你的机器解压，进入解压出来的目录（一般叫 `iperf3-fleet-main`），执行：
-
-```bash
-([ -f .env ] || echo "PANEL_PORT=$(shuf -i 10000-30000 -n 1)" > .env) && docker compose up -d --build && sleep 5 && docker compose logs --tail 15 iperf3-fleet
-```
-
-> 原则就一条：**在你放代码的那个目录里执行 `docker compose up -d --build`**，面板就部署在哪，对目录名没有任何要求。
 
 部署完成（或随时执行 `docker compose logs iperf3-fleet`）会看到这样的提示：
 
