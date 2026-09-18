@@ -4,16 +4,16 @@
 
 ## 一键部署（复制即用）
 
-**方式一：git 克隆** —— 下面整行复制到你的服务器终端执行即可（`git clone` 会自动创建目录，不需要提前手动建）：
+**方式一：git 克隆** —— 下面整行复制到你的服务器终端执行即可（`git clone` 会自动创建目录；首次部署会随机生成面板端口并记录在 `.env`）：
 
 ```bash
-git clone https://github.com/se-tang/iperf3-fleet.git && cd iperf3-fleet && docker compose up -d --build && sleep 5 && docker compose logs --tail 15 iperf3-fleet
+git clone https://github.com/se-tang/iperf3-fleet.git && cd iperf3-fleet && ([ -f .env ] || echo "PANEL_PORT=$(shuf -i 10000-30000 -n 1)" > .env) && docker compose up -d --build && sleep 5 && docker compose logs --tail 15 iperf3-fleet
 ```
 
 **方式二：网页下载 ZIP** —— 仓库页面右上角 **Code → Download ZIP**，把压缩包传到你的机器解压，进入解压出来的目录（一般叫 `iperf3-fleet-main`），执行：
 
 ```bash
-docker compose up -d --build && sleep 5 && docker compose logs --tail 15 iperf3-fleet
+([ -f .env ] || echo "PANEL_PORT=$(shuf -i 10000-30000 -n 1)" > .env) && docker compose up -d --build && sleep 5 && docker compose logs --tail 15 iperf3-fleet
 ```
 
 > 原则就一条：**在你放代码的那个目录里执行 `docker compose up -d --build`**，面板就部署在哪，对目录名没有任何要求。
@@ -23,19 +23,20 @@ docker compose up -d --build && sleep 5 && docker compose logs --tail 15 iperf3-
 ```
 ==================================================
  ✅  iperf3-fleet 面板已部署成功！
-     面板地址:  http://1.2.3.4:8088
-     登录账号:  admin
-     登录密码:  fleet-3fa2b90c
+     面板地址:  http://1.2.3.4:27182
+     登录账号:  kX3pQ9wR
+     登录密码:  aB3$kQm9!xZ7@pL2#
  下一步: 打开面板 → 添加机器 → 复制接入命令到机器上执行
 ==================================================
 ```
 
-- 面板带**登录验证**：首次启动自动生成随机密码（同时保存在 `./data/auth.json`，可修改该文件后 `docker compose restart` 生效；也可用环境变量 `PANEL_USER`/`PANEL_PASSWORD` 指定）。
+- **端口随机**：首次部署随机生成（10000-30000）并记录在 `.env`，升级/重启不变；想换端口改 `.env` 里的 `PANEL_PORT` 后 `docker compose up -d` 重建，**面板机防火墙记得放行该端口**。
+- **面板带登录验证**：首次启动自动生成随机用户名（8 位大小写字母+数字）和 16 位随机密码（大小写字母+数字+特殊字符），同时保存在 `./data/auth.json`（该文件 0600 权限）；删除它并重启可重新随机生成，也可用环境变量 `PANEL_USER`/`PANEL_PASSWORD` 指定。
 - 若修改了 compose 里的端口映射，请同步修改环境变量 `PANEL_PORT`，横幅里的地址才会正确。
 
 ## 升级
 
-以后每次升级都是同一条指令（数据、机器接入关系、测试记录全部保留，机器上的 Agent 无需重装，面板重启后自动重连）：
+以后每次升级都是同一条指令（数据、机器接入关系、测试记录、随机端口全部保留，机器上的 Agent 无需重装，面板重启后自动重连）：
 
 ```bash
 cd ~/iperf3-fleet && git pull && docker compose up -d --build
@@ -92,7 +93,7 @@ rtt min/avg/max/mdev = 144.239/144.402/146.898/0.255 ms
 
 ```bash
 cd ~/iperf3-fleet
-docker compose down && rm -rf data && docker rmi iperf3-fleet:latest
+docker compose down && rm -rf data && rm -f .env && docker rmi iperf3-fleet:latest
 ```
 
 连同代码目录一起删除：
@@ -115,7 +116,7 @@ systemctl disable --now iperf3-fleet-agent 2>/dev/null; rm -f /etc/systemd/syste
 
 ## 注意事项
 
-- **目标机防火墙**需放行 `5201/TCP`（iperf3 默认端口）并允许 ICMP；**面板机**需放行 `8088/TCP`。测试开始前面板会自动预检 5201 连通性，不通会直接给出明确报错。
+- **目标机防火墙**需放行 `5201/TCP`（iperf3 默认端口）并允许 ICMP；**面板机**需放行 `.env` 里的 `PANEL_PORT` 端口（部署横幅里会显示）。测试开始前面板会自动预检 5201 连通性，不通会直接给出明确报错。
 - 机器上的 Agent 以 root 运行（安装 iperf3 需要），Agent 只执行面板下发的测试相关命令。
 - Agent 与面板之间是 HTTP + 令牌认证；跨公网使用建议在面板前套一层 HTTPS 反代，例如 Caddy 一行即可（自动签发证书）：
   ```

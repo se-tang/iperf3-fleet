@@ -32,7 +32,7 @@ button:disabled{opacity:.6;cursor:default}
   <input id="password" type="password" autocomplete="current-password"/>
   <button id="btn">登 录</button>
   <p id="err" class="err"></p>
-  <p class="hint">默认账号 admin，随机密码在部署完成的终端提示里<br>也可查看容器内 /data/auth.json</p>
+  <p class="hint">账号与密码均为部署时随机生成<br>见部署完成的终端提示，或查看容器内 /data/auth.json</p>
 </div>
 <script>
 const btn = document.getElementById('btn');

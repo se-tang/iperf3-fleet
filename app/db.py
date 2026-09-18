@@ -4,6 +4,7 @@ import json
 import os
 import secrets
 import sqlite3
+import string
 import threading
 import time
 
@@ -127,14 +128,35 @@ def mark_stale_runs():
 
 # ---------------- 登录凭据 ----------------
 
+_USER_ALPHABET = string.ascii_letters + string.digits
+_PASS_SPECIALS = "!@#$%^&*()-_=+[]{}?"
+_PASS_ALPHABET = string.ascii_letters + string.digits + _PASS_SPECIALS
+
+
+def _gen_username(n=8):
+    return ''.join(secrets.choice(_USER_ALPHABET) for _ in range(n))
+
+
+def _gen_password(n=16):
+    """16 位随机密码：大小写字母 + 数字 + 特殊字符，保证四类至少各一。"""
+    for _ in range(100):
+        pw = ''.join(secrets.choice(_PASS_ALPHABET) for _ in range(n))
+        if (any(c.islower() for c in pw)
+                and any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw)
+                and any(c in _PASS_SPECIALS for c in pw)):
+            return pw
+    raise RuntimeError('密码生成失败')
+
+
 def ensure_auth():
-    """首次启动生成随机密码写入 auth.json；可用环境变量 PANEL_USER/PANEL_PASSWORD 覆盖。"""
+    """首次启动生成随机用户名和随机密码写入 auth.json；可用环境变量 PANEL_USER/PANEL_PASSWORD 覆盖。"""
     env_user = os.environ.get('PANEL_USER')
     env_pw = os.environ.get('PANEL_PASSWORD')
     if os.path.exists(AUTH_PATH) and not env_user and not env_pw:
         return
-    user = env_user or 'admin'
-    pw = env_pw or ('fleet-' + secrets.token_hex(4))
+    user = env_user or _gen_username()
+    pw = env_pw or _gen_password(16)
     with open(AUTH_PATH, 'w', encoding='utf-8') as f:
         json.dump({'user': user, 'password': pw}, f, ensure_ascii=False)
     try:

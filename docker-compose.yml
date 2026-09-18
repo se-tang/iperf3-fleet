@@ -5,12 +5,13 @@ services:
     container_name: iperf3-fleet
     restart: unless-stopped
     ports:
-      - "8088:8000"
+      # 对外端口在首次部署时随机生成并记录在 .env（PANEL_PORT=xxxx），升级/重启不变
+      - "${PANEL_PORT:-8088}:8000"
     environment:
       TZ: Asia/Shanghai
       DATA_DIR: /data
-      # 横幅里显示的对外端口，若修改上面的端口映射请同步修改这里
-      PANEL_PORT: 8088
+      # 横幅里显示的对外端口，与上面的端口映射保持一致
+      PANEL_PORT: ${PANEL_PORT:-8088}
     volumes:
       - ./data:/data
     healthcheck:
