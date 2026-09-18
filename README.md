@@ -109,8 +109,8 @@ systemctl disable --now iperf3-fleet-agent 2>/dev/null; rm -f /etc/systemd/syste
 ## 注意事项
 
 - **目标机防火墙**需放行 `5201/TCP`（iperf3 默认端口）并允许 ICMP；**面板机**需放行 `.env` 里的 `PANEL_PORT` 端口（部署横幅里会显示）。测试开始前面板会自动预检 5201 连通性，不通会直接给出明确报错。
-- 机器上的 Agent 以 root 运行（安装 iperf3 需要），Agent 只执行面板下发的测试相关命令。
-- Agent 与面板之间是 HTTP + 令牌认证；跨公网使用建议在面板前套一层 HTTPS 反代，例如 Caddy 一行即可（自动签发证书）：
+- 机器上的 Agent 以 root 运行（安装 iperf3 需要），但**只执行带面板 HMAC-SHA256 签名的任务**——签名密钥仅在接入命令中一次性下发、永不经网络传输，中间人篡改心跳响应注入命令会被 Agent 拒绝执行（防重放：任务编号必须递增）。升级面板后建议在机器上重新执行一次接入命令以启用签名校验。
+- Agent 与面板之间是 HTTP + 令牌认证；签名机制防住了"命令注入"，但流量仍可被窃听（令牌可被用于伪造上报数据）。跨公网使用建议在面板前套一层 HTTPS 反代，例如 Caddy 一行即可（自动签发证书）：
   ```
   panel.example.com {
       reverse_proxy 127.0.0.1:8088

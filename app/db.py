@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS machines (
     region TEXT NOT NULL DEFAULT '',
     bandwidth TEXT NOT NULL DEFAULT '',
     token TEXT NOT NULL DEFAULT '',
+    sign_key TEXT NOT NULL DEFAULT '',
     hostname TEXT NOT NULL DEFAULT '',
     agent_ip TEXT NOT NULL DEFAULT '',
     last_seen INTEGER,
@@ -90,6 +91,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE TABLE IF NOT EXISTS agent_tombstones (
     token TEXT PRIMARY KEY,
+    cmd_b64 TEXT NOT NULL DEFAULT '',
+    sig TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 '''
@@ -108,6 +111,16 @@ def init_db():
     cols_items = [r['name'] for r in db.execute('PRAGMA table_info(run_items)').fetchall()]
     if cols_items and 'phase' not in cols_items:
         db.execute("ALTER TABLE run_items ADD COLUMN phase TEXT NOT NULL DEFAULT ''")
+    cols_m = [r['name'] for r in db.execute('PRAGMA table_info(machines)').fetchall()]
+    if cols_m and 'sign_key' not in cols_m:
+        db.execute("ALTER TABLE machines ADD COLUMN sign_key TEXT NOT NULL DEFAULT ''")
+    for row in db.execute("SELECT id FROM machines WHERE sign_key=''").fetchall():
+        db.execute('UPDATE machines SET sign_key=? WHERE id=?', (secrets.token_hex(32), row['id']))
+    cols_tb = [r['name'] for r in db.execute('PRAGMA table_info(agent_tombstones)').fetchall()]
+    if cols_tb and 'cmd_b64' not in cols_tb:
+        # 墓碑是一次性瞬态数据，结构变化直接重建
+        db.execute('DROP TABLE agent_tombstones')
+        db.executescript(SCHEMA)
     db.commit()
     mark_stale_runs()
     ensure_auth()
@@ -227,8 +240,9 @@ def get_machine_by_token(token):
 def create_machine(f):
     db = get_db()
     cur = db.execute(
-        'INSERT INTO machines (name, role, region, bandwidth, token) VALUES (?,?,?,?,?)',
-        (f['name'], f['role'], f['region'], f['bandwidth'], secrets.token_hex(16)))
+        'INSERT INTO machines (name, role, region, bandwidth, token, sign_key) VALUES (?,?,?,?,?,?)',
+        (f['name'], f['role'], f['region'], f['bandwidth'],
+         secrets.token_hex(16), secrets.token_hex(32)))
     db.commit()
     return get_machine(cur.lastrowid)
 
@@ -243,7 +257,8 @@ def update_machine(mid, f):
 
 def regen_token(mid):
     db = get_db()
-    db.execute('UPDATE machines SET token=? WHERE id=?', (secrets.token_hex(16), mid))
+    db.execute('UPDATE machines SET token=?, sign_key=? WHERE id=?',
+               (secrets.token_hex(16), secrets.token_hex(32), mid))
     db.commit()
     return get_machine(mid)
 
@@ -251,32 +266,37 @@ def regen_token(mid):
 def touch_machine(mid, hostname, ip):
     db = get_db()
     db.execute('UPDATE machines SET last_seen=?, hostname=?, agent_ip=? WHERE id=?',
-               (int(time.time()), hostname or '', ip or '', mid))
+               (int(time.time()), (hostname or '')[:128], (ip or '')[:64], mid))
     db.commit()
     return get_machine(mid)
 
 
-def delete_machine(mid):
-    """删除机器；曾上线过的留下令牌墓碑，Agent 下次心跳时自动执行卸载脚本。"""
+def delete_machine(mid, cmd_b64='', sig=''):
+    """删除机器；曾上线过的留下令牌墓碑（内含已签名的卸载任务），
+    Agent 下次心跳时自动执行卸载脚本。"""
     db = get_db()
     m = get_machine(mid)
     if not m:
         return
     if m['last_seen']:
-        db.execute('INSERT OR REPLACE INTO agent_tombstones (token) VALUES (?)', (m['token'],))
+        db.execute('INSERT OR REPLACE INTO agent_tombstones (token, cmd_b64, sig) VALUES (?,?,?)',
+                   (m['token'], cmd_b64, sig))
     db.execute('DELETE FROM machines WHERE id=?', (mid,))
     db.execute('DELETE FROM jobs WHERE machine_id=?', (mid,))
     db.commit()
 
 
 def pop_tombstone(token):
-    """取出一次性墓碑：命中则删除并返回 True，面板据此下发卸载脚本。"""
+    """取出一次性墓碑：命中则删除并返回 (cmd_b64, sig)，面板据此下发已签名的卸载脚本。"""
     if not token:
-        return False
+        return None
     db = get_db()
-    cur = db.execute('DELETE FROM agent_tombstones WHERE token=?', (token,))
+    r = db.execute('SELECT cmd_b64, sig FROM agent_tombstones WHERE token=?', (token,)).fetchone()
+    if not r:
+        return None
+    db.execute('DELETE FROM agent_tombstones WHERE token=?', (token,))
     db.commit()
-    return cur.rowcount > 0
+    return dict(r)
 
 
 # ---------------- runs ----------------

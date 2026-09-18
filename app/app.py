@@ -1,12 +1,15 @@
 """iperf3-fleet 面板 Web 服务：登录验证、机器管理（Agent 接入）、测试任务、Agent API。"""
 import base64
 import datetime
+import hashlib
+import hmac
 import json
 import os
 import re
 import secrets
 import threading
 import time
+from urllib.parse import urlsplit
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, session
 
@@ -59,6 +62,31 @@ def security_headers(resp):
     resp.headers['X-Frame-Options'] = 'DENY'
     resp.headers['Referrer-Policy'] = 'no-referrer'
     return resp
+
+
+@app.before_request
+def csrf_guard():
+    """CSRF 防线：浏览器发起的跨站写请求（Origin 与站点不符）直接拒绝。
+    Agent 接口用令牌认证，不经过 Cookie，不在限制范围内。"""
+    if request.method not in ('POST', 'PUT', 'DELETE'):
+        return None
+    p = request.path
+    if not p.startswith('/api/') or p.startswith('/api/agent/'):
+        return None
+    origin = request.headers.get('Origin')
+    if origin and urlsplit(origin).netloc != request.host:
+        return jsonify({'error': '已拒绝跨站请求'}), 403
+    return None
+
+
+def _job_sig(sign_key, job_id, cmd_b64):
+    """任务签名：Agent 用接入时一次性下发的签名密钥验签后才执行，
+    防止中间人篡改心跳响应注入命令（签名密钥从不在网络中传输）。"""
+    if not sign_key:
+        return ''
+    return hmac.new(sign_key.encode('utf-8'),
+                    f'{job_id}:{cmd_b64}'.encode('utf-8'),
+                    hashlib.sha256).hexdigest()
 
 
 @app.before_request
@@ -182,9 +210,14 @@ def api_machine_regen(mid):
 
 @app.delete('/api/machines/<int:mid>')
 def api_machine_delete(mid):
-    if not db.get_machine(mid):
+    m = db.get_machine(mid)
+    if not m:
         return jsonify({'error': '机器不存在'}), 404
-    db.delete_machine(mid)
+    cmd_b64 = sig = ''
+    if m['last_seen'] and m['sign_key']:
+        cmd_b64 = base64.b64encode(_uninstall_cmd().encode('utf-8')).decode('ascii')
+        sig = _job_sig(m['sign_key'], 'tombstone-uninstall', cmd_b64)
+    db.delete_machine(mid, cmd_b64, sig)
     return jsonify({'ok': True})
 
 
@@ -221,11 +254,11 @@ def _uninstall_cmd():
 def agent_heartbeat():
     m = _agent_machine()
     if not m:
-        # 已删除机器的残留 Agent：返回一次性墓碑任务 = 卸载脚本，Agent 执行后自清理
-        if db.pop_tombstone(request.headers.get('X-Agent-Token', '')):
-            cmd_b64 = base64.b64encode(_uninstall_cmd().encode('utf-8')).decode('ascii')
+        # 已删除机器的残留 Agent：返回一次性墓碑任务 = 已签名的卸载脚本，Agent 验签后执行
+        tomb = db.pop_tombstone(request.headers.get('X-Agent-Token', ''))
+        if tomb:
             body = ('status=ok\njob_id=tombstone-uninstall\ntimeout=60\n'
-                    f'cmd_b64={cmd_b64}\n')
+                    f"cmd_b64={tomb['cmd_b64']}\nsig={tomb['sig']}\n")
             return Response(body, mimetype='text/plain; charset=utf-8')
         return jsonify({'error': 'invalid token'}), 403
     m = db.touch_machine(m['id'], request.headers.get('X-Agent-Host', ''),
@@ -234,7 +267,8 @@ def agent_heartbeat():
     lines = ['status=ok']
     if job:
         cmd_b64 = base64.b64encode(job['cmd'].encode('utf-8')).decode('ascii')
-        lines += [f"job_id={job['id']}", f"timeout={job['timeout']}", f'cmd_b64={cmd_b64}']
+        lines += [f"job_id={job['id']}", f"timeout={job['timeout']}", f'cmd_b64={cmd_b64}',
+                  f"sig={_job_sig(m['sign_key'], job['id'], cmd_b64)}"]
     return Response('\n'.join(lines) + '\n', mimetype='text/plain; charset=utf-8')
 
 

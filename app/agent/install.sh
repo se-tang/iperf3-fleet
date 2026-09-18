@@ -1,12 +1,13 @@
 #!/bin/bash
 # iperf3-fleet agent 一键安装脚本（由面板下发）
-# 用法: curl -fsSL http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌
+# 用法: curl -fsSL http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌 签名密钥
 set -e
 
 PANEL_URL="${1:-}"
 TOKEN="${2:-}"
-if [ -z "$PANEL_URL" ] || [ -z "$TOKEN" ]; then
-  echo "用法: curl -fsSL http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌"
+SIGN_KEY="${3:-}"
+if [ -z "$PANEL_URL" ] || [ -z "$TOKEN" ] || [ -z "$SIGN_KEY" ]; then
+  echo "用法: curl -fsSL http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌 签名密钥"
   exit 1
 fi
 case "$PANEL_URL" in http://*|https://*) ;; *) PANEL_URL="http://$PANEL_URL" ;; esac
@@ -16,18 +17,28 @@ if [ "$(id -u)" != "0" ]; then
   exit 1
 fi
 
-if ! command -v curl >/dev/null 2>&1; then
-  echo "[install] 正在安装 curl ..."
-  apt-get install -y curl 2>/dev/null || yum install -y curl 2>/dev/null \
-    || dnf install -y curl 2>/dev/null || apk add --no-cache curl 2>/dev/null || {
-      echo "❌ curl 安装失败，请手动安装 curl 后重试"; exit 1; }
+ensure_pkg() { # $1=命令 $2=包名(apt) $3=包名(alpine)
+  command -v "$1" >/dev/null 2>&1 && return 0
+  echo "[install] 正在安装 $2 ..."
+  apt-get install -y "$2" 2>/dev/null || yum install -y "$2" 2>/dev/null \
+    || dnf install -y "$2" 2>/dev/null || apk add --no-cache "$3" 2>/dev/null || return 1
+  command -v "$1" >/dev/null 2>&1
+}
+
+if ! ensure_pkg curl curl curl; then
+  echo "❌ curl 安装失败，请手动安装 curl 后重试"
+  exit 1
+fi
+if ! ensure_pkg openssl openssl openssl; then
+  echo "❌ openssl 安装失败（Agent 需要它校验任务签名）"
+  exit 1
 fi
 
 mkdir -p /usr/local/lib/iperf3-fleet /etc/iperf3-fleet /var/lib/iperf3-fleet
 
 cat > /usr/local/lib/iperf3-fleet/agent.sh << 'AGENT_EOF'
 #!/bin/bash
-# iperf3-fleet agent 主循环：心跳领取任务 → 执行 → 流式回传输出
+# iperf3-fleet agent 主循环：心跳领取任务 → 验签 → 执行 → 流式回传输出
 CONF=/etc/iperf3-fleet/agent.conf
 [ -f "$CONF" ] || exit 1
 . "$CONF"
@@ -48,6 +59,14 @@ send_output() { # $1=job_id $2=file $3=done $4=exit_code
     --data-urlencode "exit_code=$4" >/dev/null 2>&1
 }
 
+# 任务签名校验：签名密钥只在接入时下发一次，任何没有签名的任务一律拒绝执行
+verify_sig() { # $1=job_id $2=cmd_b64 $3=sig
+  [ -n "$SIGN_KEY" ] || return 1
+  [ -n "$3" ] || return 1
+  calc=$(printf '%s' "$1:$2" | openssl dgst -sha256 -hmac "$SIGN_KEY" 2>/dev/null | awk '{print $NF}')
+  [ -n "$calc" ] && [ "$calc" = "$3" ]
+}
+
 while true; do
   resp=$(heartbeat) || { sleep 5; continue; }
   job_id=$(printf '%s\n' "$resp" | sed -n 's/^job_id=//p')
@@ -57,6 +76,27 @@ while true; do
   fi
   timeout=$(printf '%s\n' "$resp" | sed -n 's/^timeout=//p')
   timeout=${timeout:-120}
+  sig=$(printf '%s\n' "$resp" | sed -n 's/^sig=//p')
+  cmd_b64=$(printf '%s\n' "$resp" | sed -n 's/^cmd_b64=//p')
+
+  if ! verify_sig "$job_id" "$cmd_b64" "$sig"; then
+    echo "$(date '+%F %T') 拒绝执行：任务 #$job_id 签名校验失败（疑似被篡改）" >> "$SPOOL/agent.log"
+    sleep 5
+    continue
+  fi
+
+  # 防重放：数值任务编号必须递增（墓碑等特殊任务除外）
+  case "$job_id" in
+    ''|*[!0-9]*) ;;
+    *) last=$(cat "$SPOOL/last_job_id" 2>/dev/null || echo 0)
+       if [ "$job_id" -le "$last" ]; then
+         echo "$(date '+%F %T') 拒绝执行：任务 #$job_id 为重放" >> "$SPOOL/agent.log"
+         sleep 5
+         continue
+       fi
+       echo "$job_id" > "$SPOOL/last_job_id" ;;
+  esac
+
   printf '%s\n' "$resp" | sed -n 's/^cmd_b64=//p' | base64 -d > "$SPOOL/job.sh" 2>/dev/null
 
   out="$SPOOL/job.out"
@@ -96,6 +136,7 @@ chmod 700 /usr/local/lib/iperf3-fleet/agent.sh
 cat > /etc/iperf3-fleet/agent.conf << CONF_EOF
 PANEL_URL='$PANEL_URL'
 TOKEN='$TOKEN'
+SIGN_KEY='$SIGN_KEY'
 CONF_EOF
 chmod 600 /etc/iperf3-fleet/agent.conf
 

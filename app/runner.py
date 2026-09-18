@@ -101,8 +101,11 @@ def start_run(target_id, backend_ids):
         if not db.machine_online(target):
             raise RuntimeError('目标机器的 Agent 未上线，请先在该机器上执行接入命令并等待其上线')
         for bid in backend_ids:
-            if not db.get_machine(bid):
+            m = db.get_machine(bid)
+            if not m:
                 raise RuntimeError(f'后端机器 #{bid} 不存在')
+            if m['role'] != 'backend':
+                raise RuntimeError(f'机器「{m["name"]}」的角色不是「后端机器」，不能作为后端参加测试')
         run_id = db.create_run(target, backend_ids)
         _active[run_id] = {'stop': False, 'log': []}
     threading.Thread(target=_worker, args=(run_id, target), daemon=True).start()
