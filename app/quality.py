@@ -216,6 +216,19 @@ def evaluate(mt, machine):
     return mt
 
 
+def mask_ip(ip):
+    """报告脱敏：IPv4 只保留 A.B 两段（C/D 段打码）；IPv6 保留前两组。"""
+    if not ip:
+        return ip
+    parts = ip.split('.')
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        return f'{parts[0]}.{parts[1]}.*.*'
+    m = re.match(r'^([0-9a-fA-F]{1,4}:[0-9a-fA-F]{1,4}):', ip)
+    if m:
+        return m.group(1) + ':****'
+    return ip
+
+
 def build_report(run, target, items):
     """生成 Markdown 报告：汇总表（含线路质量评价列）+ 每台机器的原始摘录。"""
     lines = []
@@ -223,7 +236,7 @@ def build_report(run, target, items):
     lines.append('')
     lines.append(
         f"- **目标机器**：{target['name']}"
-        f"（{target.get('region') or '地区未标记'} · {target.get('bandwidth') or '带宽未标记'} · `{target.get('host')}`）")
+        f"（{target.get('region') or '地区未标记'} · {target.get('bandwidth') or '带宽未标记'} · `{mask_ip(target.get('host'))}`）")
     lines.append(f"- **测试时间**：{run['created_at']} ~ {run.get('finished_at') or ''}")
     lines.append('- **测试方式**：iperf3 单线程 10 秒 ×（上行 / 下行 -R）+ `ping -c 200 -i 1`；iperf3 全局串行，ping 与其它机器的 iperf3 并行')
     lines.append('')
@@ -252,7 +265,7 @@ def build_report(run, target, items):
         lines.append('')
         lines.append(
             f"### 后端机器{idx}：{it['machine_name']}"
-            f"（{it['machine_region'] or '未标记'} · {it['machine_bandwidth'] or '未标记'} · {it['machine_host']}）")
+            f"（{it['machine_region'] or '未标记'} · {it['machine_bandwidth'] or '未标记'} · {mask_ip(it['machine_host'])}）")
         lines.append('')
         lines.append('```')
         if it['status'] == 'done' and it['metrics']:

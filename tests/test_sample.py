@@ -93,6 +93,9 @@ def test_report():
     assert '❌ 失败：SSH 连接失败' in report
     assert '### 后端机器1：HK-01' in report
     assert 'rtt min/avg/max/mdev = 144.239/144.402/146.898/0.255 ms' in report
+    # IP 脱敏：C/D 段打码
+    assert '1.2.*.*' in report and '1.2.3.4' not in report
+    assert '5.6.*.*' in report and '5.6.7.8' not in report
     print('---- 报告预览 ----')
     print(report)
     return report
