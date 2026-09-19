@@ -127,8 +127,9 @@ def test_xff_and_limiter():
            environ_base={'REMOTE_ADDR': '127.0.0.1'})
     assert db.get_machine(m1b['id'])['agent_ip'] == '203.0.113.7'
 
-    # 2b) 方式 B 实际链路（CF 橙云 → Caddy → 面板）：Caddy 按 trusted_proxies
-    #     算出真实客户端 IP 并覆盖 XFF；走私的 CF-Connecting-IP（边缘 IP）被忽略
+    # 2b) 方式 B 实际链路（CF 橙云 → Caddy → 面板）：Caddyfile.origin 用
+    #     header_up 把 XFF 覆盖为 CF-Connecting-IP（CF 写入的 Agent 真实 IP），
+    #     请求自带的其他转发头/走私值被覆盖丢弃
     m1c = db.create_machine({'name': 'xff-cfchain', 'role': 'backend', 'region': '', 'bandwidth': ''})
     c.post('/api/agent/heartbeat',
            headers={'X-Agent-Token': m1c['token'],
