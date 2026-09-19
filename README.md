@@ -37,7 +37,8 @@ docker compose --profile tls up -d
 
 之后访问 `https://panel.example.com`。
 
-确认 HTTPS 正常后，在 `.env` 追加 `PANEL_BIND=127.0.0.1` 并 `docker compose up -d`，关闭公网 HTTP 直连（面板与 Agent 均走域名接入，Agent 真实 IP 由 Caddy 识别 Cloudflare 回源网段后计算传递）。
+确认 HTTPS 正常后，在 `.env` 追加 `PANEL_BIND=127.0.0.1` 并 `docker compose up -d`，关闭公网 HTTP 直连（面板与 Agent 均走域名接入）。
+方式 B 下 Agent 真实 IP 取自 CF-Connecting-IP，**源站防火墙/安全组务必只放行 Cloudflare 回源网段**（https://www.cloudflare.com/ips/），否则能直连 Caddy 的人可自带该头伪造 agent_ip。
 
 注意：登录限速按来源 IP 计，经反代部署时所有登录共享同一桶——他人 5 次失败会短暂锁住登录页（300 秒）。
 
