@@ -13,10 +13,10 @@ git clone https://github.com/se-tang/iperf3-fleet.git && cd iperf3-fleet && ([ -
 
 ## HTTPS（可选）
 
-**方式 A：80/443 空闲** — Caddy 自动签发证书，部署命令执行完即可：
+**方式 A：80/443 空闲** — Caddy 自动签发证书：
 
 ```bash
-cd ~/iperf3-fleet && git pull && docker compose --profile tls up -d
+cd ~/iperf3-fleet && git pull && cp Caddyfile.acme Caddyfile.local && docker compose --profile tls up -d
 ```
 
 **方式 B：80/443 被占用 + Cloudflare 橙云** — 用 Cloudflare 源证书（15 年有效，无需续期）：
@@ -26,7 +26,7 @@ cd ~/iperf3-fleet && git pull && docker compose --profile tls up -d
 
 ```bash
 cd ~/iperf3-fleet
-cp Caddyfile.origin Caddyfile
+cp Caddyfile.origin Caddyfile.local
 echo "CADDY_HTTPS=8443" >> .env
 echo "PANEL_COOKIE_SECURE=1" >> .env
 docker compose --profile tls up -d
@@ -57,7 +57,7 @@ docker compose --profile tls up -d
 ## 升级
 
 ```bash
-cd ~/iperf3-fleet && git pull && docker compose up -d --build
+cd ~/iperf3-fleet && git pull && ([ -f Caddyfile.local ] || cp Caddyfile.acme Caddyfile.local) && docker compose up -d --build
 ```
 
 数据、机器接入关系、端口全部保留，Agent 自动重连。
