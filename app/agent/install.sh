@@ -167,11 +167,13 @@ RestartSec=5
 WantedBy=multi-user.target
 UNIT_EOF
   systemctl daemon-reload
-  if ! systemctl enable --now iperf3-fleet-agent >/dev/null 2>&1; then
-    systemctl restart iperf3-fleet-agent 2>/dev/null || {
-      echo "❌ systemd 启动 agent 失败，请执行 journalctl -u iperf3-fleet-agent -n 20 查看原因"
-      exit 1
-    }
+  systemctl enable iperf3-fleet-agent >/dev/null 2>&1
+  # 必须用 restart：重复安装时 enable --now 不会重启已运行的服务，
+  # 会导致新令牌/签名密钥不生效、Agent 一直离线
+  systemctl restart iperf3-fleet-agent
+  if ! systemctl is-active --quiet iperf3-fleet-agent; then
+    echo "❌ systemd 启动 agent 失败，请执行 journalctl -u iperf3-fleet-agent -n 20 查看原因"
+    exit 1
   fi
   echo "✅ Agent 已安装并通过 systemd 启动（服务名: iperf3-fleet-agent）"
 else
