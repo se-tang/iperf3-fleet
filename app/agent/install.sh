@@ -73,7 +73,13 @@ verify_sig() { # $1=job_id $2=cmd_b64 $3=sig
 }
 
 while true; do
-  resp=$(heartbeat) || { sleep 5; continue; }
+  resp=$(heartbeat)
+  hb_rc=$?
+  if [ $hb_rc -ne 0 ]; then
+    echo "$(date '+%F %T') 心跳失败 curl_exit=$hb_rc（7=连接被拒 28=超时 22=令牌被面板拒绝）" >> "$SPOOL/agent.log"
+    sleep 5
+    continue
+  fi
   job_id=$(printf '%s\n' "$resp" | sed -n 's/^job_id=//p')
   if [ -z "$job_id" ]; then
     sleep 3
@@ -161,7 +167,12 @@ RestartSec=5
 WantedBy=multi-user.target
 UNIT_EOF
   systemctl daemon-reload
-  systemctl enable --now iperf3-fleet-agent >/dev/null 2>&1 || systemctl restart iperf3-fleet-agent
+  if ! systemctl enable --now iperf3-fleet-agent >/dev/null 2>&1; then
+    systemctl restart iperf3-fleet-agent 2>/dev/null || {
+      echo "❌ systemd 启动 agent 失败，请执行 journalctl -u iperf3-fleet-agent -n 20 查看原因"
+      exit 1
+    }
+  fi
   echo "✅ Agent 已安装并通过 systemd 启动（服务名: iperf3-fleet-agent）"
 else
   pkill -f "iperf3-fleet/agent.sh" 2>/dev/null || true
@@ -169,6 +180,16 @@ else
   (crontab -l 2>/dev/null | grep -v "iperf3-fleet/agent.sh"
    echo "@reboot bash /usr/local/lib/iperf3-fleet/agent.sh >> /var/lib/iperf3-fleet/agent.log 2>&1") | crontab - 2>/dev/null || true
   echo "✅ Agent 已安装并通过 nohup+cron 启动（未检测到 systemd）"
+fi
+
+echo "[install] 检查本机到面板的连通性..."
+if curl -fsS -m 5 "$PANEL_URL/api/health" >/dev/null 2>&1; then
+  echo "✅ 面板连通性正常"
+else
+  echo "⚠️ 警告：本机访问不到面板 $PANEL_URL/api/health"
+  echo "   Agent 将无法上线！请在面板机放行该端口（防火墙/云安全组），"
+  echo "   然后执行: systemctl restart iperf3-fleet-agent"
+  exit 1
 fi
 
 echo "正在等待面板确认接入（约 3 秒）..."
