@@ -15,6 +15,8 @@ from flask import Flask, Response, jsonify, redirect, render_template, request, 
 
 from . import db, runner
 
+APP_VERSION = '2.5.0'
+
 app = Flask(__name__)
 app.json.ensure_ascii = False
 app.secret_key = db.get_secret_key()
@@ -109,14 +111,14 @@ def auth_gate():
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html', version=APP_VERSION)
 
 
 @app.route('/login')
 def login_page():
     if session.get('user'):
         return redirect('/')
-    return render_template('login.html')
+    return render_template('login.html', version=APP_VERSION)
 
 
 @app.post('/api/login')
@@ -359,7 +361,7 @@ def api_run_report(rid):
 
 @app.get('/api/status')
 def api_status():
-    return jsonify({'active_run_id': runner.active_run_id()})
+    return jsonify({'active_run_id': runner.active_run_id(), 'version': APP_VERSION})
 
 
 @app.errorhandler(ValueError)
