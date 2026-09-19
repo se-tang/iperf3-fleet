@@ -7,8 +7,18 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>"/>
 <style>
 :root{
+  --bg:#f6f2e7; --card:#fffdf4; --border:#ddd5bd; --text:#33312a; --muted:#8a8471;
+  --accent:#0369a1; --green:#16a34a; --lime:#4d7c0f; --orange:#ea580c; --red:#dc2626;
+  --btn-bg:#efe9d6; --btn-border:#d8d0b6; --btn-hover:#e5ddc4;
+  --primary:#0284c7; --primary-hover:#0369a1;
+  --input-bg:#fffef9; --code-bg:#f4efdd; --mask:rgba(60,55,35,.45);
+}
+body[data-theme='dark']{
   --bg:#0f172a; --card:#1e293b; --border:#334155; --text:#e2e8f0; --muted:#94a3b8;
   --accent:#38bdf8; --green:#4ade80; --lime:#a3e635; --orange:#fb923c; --red:#f87171;
+  --btn-bg:#334155; --btn-border:#475569; --btn-hover:#475569;
+  --primary:#0284c7; --primary-hover:#0369a1;
+  --input-bg:#0f172a; --code-bg:#0b1220; --mask:rgba(0,0,0,.55);
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
@@ -22,13 +32,13 @@ h3{font-size:13px;color:var(--muted);margin:16px 0 8px}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{padding:7px 9px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
 th{color:var(--muted);font-weight:600;white-space:nowrap}
-button{background:#334155;color:var(--text);border:1px solid #475569;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px}
-button:hover{background:#475569}
-button.primary{background:#0284c7;border-color:#0284c7}
-button.primary:hover{background:#0369a1}
+button{background:var(--btn-bg);color:var(--text);border:1px solid var(--btn-border);border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px}
+button:hover{background:var(--btn-hover)}
+button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+button.primary:hover{background:var(--primary-hover)}
 button.danger{color:var(--red)}
 button.small{padding:3px 8px;font-size:12px}
-select,input,textarea{background:#0f172a;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px;font-family:inherit}
+select,input,textarea{background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px;font-family:inherit}
 textarea{width:100%;min-height:110px;resize:vertical;font-family:ui-monospace,Consolas,monospace}
 .badge{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;border:1px solid;white-space:nowrap}
 .badge.target{color:var(--accent);border-color:var(--accent)}
@@ -38,7 +48,7 @@ textarea{width:100%;min-height:110px;resize:vertical;font-family:ui-monospace,Co
 .badge.partial{color:var(--orange);border-color:var(--orange)}
 .badge.failed,.badge.stopped{color:var(--red);border-color:var(--red)}
 .hint{color:var(--muted);font-size:12px;margin:8px 0 0}
-.hint code{background:#0b1220;padding:1px 5px;border-radius:4px}
+.hint code{background:var(--code-bg);padding:1px 5px;border-radius:4px}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0}
 pre{background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:12px;overflow:auto;font-size:12px;max-height:340px;font-family:ui-monospace,Consolas,monospace}
 details{border:1px solid var(--border);border-radius:8px;padding:8px 12px;margin:8px 0}
@@ -54,10 +64,10 @@ summary{cursor:pointer;font-weight:600}
 .rating-a{color:var(--lime);font-weight:600}
 .rating-b{color:var(--orange);font-weight:600}
 .rating-c{color:var(--red);font-weight:600}
-.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:50}
+.modal-mask{position:fixed;inset:0;background:var(--mask);display:flex;align-items:center;justify-content:center;z-index:50}
 /* hidden 必须排在 modal-mask 之后并用 !important，否则 display:flex 会覆盖掉隐藏（历史 bug） */
 .hidden{display:none!important}
-.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#0284c7;color:#fff;padding:10px 18px;border-radius:8px;z-index:99;max-width:80vw;box-shadow:0 6px 20px rgba(0,0,0,.4)}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--primary);color:#fff;padding:10px 18px;border-radius:8px;z-index:99;max-width:80vw;box-shadow:0 6px 20px rgba(0,0,0,.4)}
 .actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .chk{display:flex;align-items:center;gap:6px;font-size:13px}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
@@ -74,13 +84,13 @@ summary{cursor:pointer;font-weight:600}
 .log-ok{color:var(--green)}
 .log-bad{color:var(--red)}
 .log-hl{color:var(--accent);font-weight:600}
-.md-render{background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:16px;max-height:500px;overflow:auto;font-size:13px}
+.md-render{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:16px;max-height:500px;overflow:auto;font-size:13px}
 .md-render h2{font-size:16px;margin:14px 0 8px;color:var(--text)}
 .md-render h3{font-size:14px;color:var(--text);margin:12px 0 6px}
 .md-render h4{font-size:13px;margin:10px 0 6px}
 .md-render p{margin:6px 0}
 .md-render blockquote{border-left:3px solid var(--accent);margin:8px 0;padding:2px 10px;color:var(--muted)}
-.md-render code{background:#1e293b;padding:1px 5px;border-radius:4px}
+.md-render code{background:var(--card);padding:1px 5px;border-radius:4px}
 .md-render pre{max-height:none;margin:8px 0}
 .md-table{margin:10px 0}
 </style>
@@ -89,8 +99,8 @@ summary{cursor:pointer;font-weight:600}
 <header>
   <h1>📡 iperf3-fleet 线路测试面板 <span class="muted" style="font-size:12px;font-weight:400">v{{ version }}</span></h1>
   <div class="actions">
-    <span class="muted" style="font-size:12px">Agent 接入 · 无需 SSH 凭据</span>
     <span id="meUser" class="muted" style="font-size:12px"></span>
+    <button class="small" data-action="toggleTheme" id="themeBtn">🌙 深色</button>
     <button class="small" data-action="logout">退出登录</button>
   </div>
 </header>
@@ -106,7 +116,7 @@ summary{cursor:pointer;font-weight:600}
       <tbody id="machinesBody"></tbody>
     </table>
     </div>
-    <p class="hint">「目标机器」是被测端（运行 iperf3 -s，建议只设一台）；「后端机器」是发起测试的一端。添加机器后复制接入命令到机器上以 root 执行，Agent 上线后即可测试。带宽/地区标记会显示在报告中并参与线路质量评价。</p>
+    <p class="hint">目标=被测端（iperf3 -s，建议一台）；后端=发起端。接入命令需 root 执行。地区/带宽标记用于报告与质量评价。</p>
   </section>
 
   <section class="card">
@@ -118,10 +128,8 @@ summary{cursor:pointer;font-weight:600}
     </div>
     <div class="row"><button class="primary" data-action="startRun">🚀 开始测试</button></div>
     <p class="hint">
-      流程：通过 Agent 自动检查/安装 iperf3 → 目标机启动 <code>iperf3 -s</code> → 每台后端执行
-      <code>iperf3 -c 目标 -t 10</code>、<code>iperf3 -c 目标 -R -t 10</code>（iperf3 全局串行，结果互不干扰）→
-      <code>ping -c 200 -i 1 目标</code>（不占测速通道，与其它机器的 iperf3 并行）。总时长 ≈ 1 分钟 + 台数×25 秒 + 3.5 分钟。
-      请确保目标机防火墙放行 <b>5201/TCP</b> 且允许 ICMP（开始前会自动预检）。
+      iperf3 全局串行（上/下行各 10 秒），ping 200 次并行；总时长 ≈ 1 分钟 + 台数×25 秒 + 3.5 分钟。
+      目标机需放行 5201/TCP 与 ICMP（开始前自动预检）。
     </p>
   </section>
 
@@ -188,7 +196,7 @@ summary{cursor:pointer;font-weight:600}
         <div class="field"><label>带宽标记（如 500M / 1G / 不限）</label><input id="mBandwidth" placeholder="500M"/></div>
       </div>
       <p class="hint" id="mRoleHint"></p>
-      <p class="hint">面板不保存任何 SSH 密码/密钥：保存后只需在机器上执行一条 Agent 接入命令即可纳入管理。</p>
+      <p class="hint">不保存任何 SSH 凭据；保存后复制接入命令到机器执行即可。</p>
       <div class="actions" style="justify-content:flex-end;margin-top:10px">
         <button data-action="closeModal">取消</button>
         <button class="primary" data-action="saveMachine">保存并生成接入命令</button>
@@ -196,16 +204,16 @@ summary{cursor:pointer;font-weight:600}
     </div>
     <!-- 第二步：Agent 接入 -->
     <div id="mStepAgent" class="hidden">
-      <h3>接入 Agent</h3>
+      <h3>接入 Agent：<span id="agentStepName" style="color:var(--text)"></span></h3>
       <div class="field">
-        <label>面板地址（Agent 需能访问该地址，按需修改）</label>
+        <label>面板地址（Agent 需能访问，按需修改）</label>
         <input id="agentPanelUrl"/>
       </div>
-      <p class="hint">在机器上以 <b>root</b> 执行下面这条命令，执行完 Agent 会自动上线（无需开放机器任何入站端口）：</p>
+      <p class="hint">在机器上以 root 执行，执行完自动上线（机器无需开放入站端口）：</p>
       <pre id="agentCmd"></pre>
       <div class="actions">
         <button data-action="copyAgentCmd">📋 复制命令</button>
-        <button data-action="regenToken" class="hidden" id="regenBtn">♻ 重置令牌</button>
+        <button data-action="regenToken" id="regenBtn">♻ 重置密钥</button>
         <button class="primary hidden" data-action="closeModal" id="agentDoneBtn">✅ 已上线，完成</button>
         <button data-action="closeModal" id="agentSkipBtn">稍后接入</button>
       </div>
@@ -310,8 +318,8 @@ function renderMachines() {
 
 function updateRoleHint() {
   $('mRoleHint').textContent = $('mRole').value === 'target'
-    ? '⚠️ 目标机器在测试时运行 iperf3 -s：请确保其他机器能访问它的 5201/TCP 端口并允许 ICMP。角色修改即时生效，Agent 无需任何改动。'
-    : '后端机器负责发起测试。角色修改即时生效，Agent 无需任何改动。';
+    ? '⚠️ 改为目标机：测试时运行 iperf3 -s，需放行 5201/TCP 与 ICMP。修改即时生效。'
+    : '发起测试端。修改即时生效。';
 }
 
 function openMachineForm(m) {
@@ -339,6 +347,7 @@ function buildAgentCmd() {
 
 function showAgentStep(m) {
   agentMachine = m;
+  $('agentStepName').textContent = m.name;
   $('mStepForm').classList.add('hidden');
   $('mStepAgent').classList.remove('hidden');
   $('agentDoneBtn').classList.add('hidden');
@@ -417,7 +426,7 @@ async function regenToken() {
   try {
     agentMachine = await api(`/api/machines/${agentMachine.id}/regen-token`, {method: 'POST'});
     $('agentCmd').textContent = buildAgentCmd();
-    $('agentWait').textContent = '⏳ 令牌已重置，请复制新命令在机器上重新执行。';
+    $('agentWait').textContent = '⏳ 密钥已重置，请复制新命令在机器上重新执行。';
     toast('令牌已重置');
   } catch (e) {
     alert(e.message);
@@ -657,6 +666,16 @@ function renderMarkdown(src) {
   return html;
 }
 
+function applyTheme(t) {
+  document.body.dataset.theme = t;
+  try { localStorage.setItem('fleet-theme', t); } catch (e) {}
+  $('themeBtn').textContent = t === 'light' ? '🌙 深色' : '☀️ 浅色';
+}
+
+function toggleTheme() {
+  applyTheme(document.body.dataset.theme === 'dark' ? 'light' : 'dark');
+}
+
 function toggleReportView() {
   const pre = $('reportPre'), div = $('reportRender'), btn = $('reportToggleBtn');
   if (pre.classList.contains('hidden')) {
@@ -718,6 +737,7 @@ const ACTIONS = {
   removeRun: (d) => removeRun(d.id),
   copyReport,
   toggleReportView,
+  toggleTheme,
   downloadReport,
   stopCurrentRun,
 };
@@ -750,6 +770,7 @@ $('mRole').addEventListener('change', updateRoleHint);
 
 async function init() {
   try {
+    applyTheme(localStorage.getItem('fleet-theme') || 'light');
     const me = await api('/api/me');
     $('meUser').textContent = me.user ? `👤 ${me.user}` : '';
     await loadMachines();
