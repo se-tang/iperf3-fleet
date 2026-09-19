@@ -4,7 +4,9 @@
 ping 200 次不占测速通道，与后续机器的 iperf3 并行执行，充分利用等待时间。
 总时长 ≈ 环境准备 + 台数×25 秒 + 最后 200 秒。
 """
+import ipaddress
 import json
+import shlex
 import threading
 import time
 import traceback
@@ -258,6 +260,11 @@ def _run_backend(lane, st, log, stop_check, target, it, idx):
             raise RuntimeError('iperf3/ping 检查安装失败: ' + (out or '').strip()[-300:])
 
         tq = target['agent_ip']
+        # 防御性校验：目标地址必须是合法 IP，避免任何路径上的命令注入
+        try:
+            ipaddress.ip_address(tq)
+        except ValueError:
+            raise RuntimeError(f'目标机地址无效（{tq!r}），请让 Agent 重新接入以更新 IP')
 
         # 等待 iperf3 通道（前一台的 iperf3 结束后立刻轮到本机，ping 不占通道）
         db.update_item(iid, phase='等待 iperf3 通道')
@@ -276,7 +283,7 @@ def _run_backend(lane, st, log, stop_check, target, it, idx):
                 if code != 0:
                     raise RuntimeError(f'目标机 {tq} 的 5201/TCP 从本机不可达（请检查目标机防火墙是否放行 5201）')
 
-            cmd_up = f'iperf3 -c {tq} -t 10'
+            cmd_up = f'iperf3 -c {shlex.quote(tq)} -t 10'
             db.update_item(iid, phase='上行测试')
             log(f'[{name}] $ {cmd_up}')
             code, up_raw = _job(m, cmd_up, 90, log, stop_check)
@@ -284,7 +291,7 @@ def _run_backend(lane, st, log, stop_check, target, it, idx):
                 raise RuntimeError('上行测试失败: ' + (up_raw or '').strip()[-200:])
             time.sleep(1)
 
-            cmd_down = f'iperf3 -c {tq} -R -t 10'
+            cmd_down = f'iperf3 -c {shlex.quote(tq)} -R -t 10'
             db.update_item(iid, phase='下行测试')
             log(f'[{name}] $ {cmd_down}')
             code, down_raw = _job(m, cmd_down, 90, log, stop_check)
@@ -295,7 +302,7 @@ def _run_backend(lane, st, log, stop_check, target, it, idx):
         time.sleep(1)
 
         # ping 不占通道，与后续机器的 iperf3 并行
-        cmd_ping = f'ping -c 200 -i 1 {tq}'
+        cmd_ping = f'ping -c 200 -i 1 {shlex.quote(tq)}'
         db.update_item(iid, phase='ping 200次（约3分钟）')
         log(f'[{name}] $ {cmd_ping}  （约需 200 秒，与其它机器的 iperf3 并行）')
         code, ping_raw = _job(m, cmd_ping, 300, log, stop_check)

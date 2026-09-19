@@ -8,7 +8,7 @@ Docker 化的 iperf3 多机线路质量测试面板。Agent 接入（面板不�
 git clone https://github.com/se-tang/iperf3-fleet.git && cd iperf3-fleet && ([ -f .env ] || echo "PANEL_PORT=$(shuf -i 10000-30000 -n 1)" > .env) && docker compose up -d --build && sleep 5 && docker compose logs --tail 15 iperf3-fleet
 ```
 
-- 端口随机生成（记录在 `.env`，升级/重启不变），登录账号密码随机生成，均在部署横幅里显示。
+- 端口随机生成（记录在 `.env`，升级/重启不变），登录账号密码随机生成，均在部署横幅里显示一次；忘记密码删 `data/auth.json` 重启重新生成。
 - 面板容器默认只读文件系统 + 最小权限运行。
 
 ## HTTPS（可选）

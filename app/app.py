@@ -3,6 +3,7 @@ import base64
 import datetime
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import time
 from urllib.parse import urlsplit
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, session
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import db, quality, runner
 
@@ -39,23 +41,54 @@ _PUBLIC_PATHS = {'/login', '/api/login', '/api/health', '/favicon.ico'}
 # 登录防爆破：同一 IP 60 秒内失败 5 次 → 锁定 300 秒
 _FAIL_WINDOW = 60.0
 _FAIL_MAX = 5
-_login_fails = {}
+_LOCK_SECONDS = 300
+_login_fails = {}  # ip -> {'fails': [时间戳], 'locked_until': 时间戳}
 _lf_lock = threading.Lock()
 
 
-def _too_many_login_fails(ip):
-    now = time.time()
+def _client_ip():
+    """真实客户端 IP：直连取 remote_addr；经反代（remote 为内网 IP 且带
+    X-Forwarded-For）时取 XFF 首个合法 IP。仅在 remote 为私网时采信 XFF，
+    防止直连方伪造头绕过限速或伪造 agent_ip。"""
+    ra = request.remote_addr or ''
+    ip = ra
+    try:
+        behind_proxy = ipaddress.ip_address(ra).is_private
+    except ValueError:
+        behind_proxy = False
+    xff = request.headers.get('X-Forwarded-For', '')
+    if behind_proxy and xff:
+        first = xff.split(',')[0].strip()
+        try:
+            ipaddress.ip_address(first)
+            ip = first
+        except ValueError:
+            pass
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        ip = ra
+    return ip[:64]
+
+
+def _login_locked_seconds(ip):
     with _lf_lock:
-        recent = [t for t in _login_fails.get(ip, []) if now - t < _FAIL_WINDOW]
-        _login_fails[ip] = recent
-        return len(recent) >= _FAIL_MAX
+        rec = _login_fails.get(ip)
+        if not rec:
+            return 0
+        remain = rec.get('locked_until', 0) - time.time()
+        return max(0, int(remain))
 
 
 def _record_login_fail(ip):
+    now = time.time()
     with _lf_lock:
-        _login_fails.setdefault(ip, []).append(time.time())
-        if len(_login_fails[ip]) > 50:
-            _login_fails[ip] = _login_fails[ip][-50:]
+        rec = _login_fails.setdefault(ip, {'fails': [], 'locked_until': 0})
+        rec['fails'] = [t for t in rec['fails'] if now - t < _FAIL_WINDOW]
+        rec['fails'].append(now)
+        if len(rec['fails']) >= _FAIL_MAX:
+            rec['locked_until'] = now + _LOCK_SECONDS
+            rec['fails'] = []
 
 
 @app.after_request
@@ -123,13 +156,15 @@ def login_page():
 
 @app.post('/api/login')
 def api_login():
-    ip = request.remote_addr or '?'
-    if _too_many_login_fails(ip):
-        return jsonify({'error': '失败次数过多，请 5 分钟后再试'}), 429
+    ip = _client_ip()
+    locked = _login_locked_seconds(ip)
+    if locked:
+        return jsonify({'error': f'失败次数过多，已锁定，请 {locked} 秒后再试'}), 429
     data = request.get_json(force=True, silent=True) or {}
-    user, password = db.get_auth()
+    user, pw_hash = db.get_auth()
     ok = (secrets.compare_digest(str(data.get('user') or ''), user)
-          and secrets.compare_digest(str(data.get('password') or ''), password))
+          and bool(pw_hash)
+          and check_password_hash(pw_hash, str(data.get('password') or '')))
     if not ok:
         _record_login_fail(ip)
         return jsonify({'error': '用户名或密码错误'}), 401
@@ -267,7 +302,7 @@ def agent_heartbeat():
             return Response(body, mimetype='text/plain; charset=utf-8')
         return jsonify({'error': 'invalid token'}), 403
     m = db.touch_machine(m['id'], request.headers.get('X-Agent-Host', ''),
-                         request.remote_addr or '')
+                         _client_ip())
     job = db.next_queued_job(m['id'])
     lines = ['status=ok']
     if job:
@@ -374,4 +409,6 @@ def handle_value_error(e):
 if __name__ == '__main__':
     db.init_db()
     from waitress import serve
-    serve(app, host='0.0.0.0', port=8000, threads=8)
+    # clear_untrusted_proxy_headers=False：保留 X-Forwarded-For 交给 _client_ip()
+    # 按规则采信（仅反代/内网来源），否则经 Caddy 接入的 Agent 真实 IP 会被剥离
+    serve(app, host='0.0.0.0', port=8000, threads=8, clear_untrusted_proxy_headers=False)

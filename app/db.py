@@ -8,6 +8,8 @@ import string
 import threading
 import time
 
+from werkzeug.security import generate_password_hash
+
 _DATA_DIR = os.environ.get('DATA_DIR')
 if not _DATA_DIR:
     _DATA_DIR = '/data' if os.name != 'nt' else os.path.join(
@@ -15,6 +17,7 @@ if not _DATA_DIR:
 os.makedirs(_DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(_DATA_DIR, 'panel.db')
 AUTH_PATH = os.path.join(_DATA_DIR, 'auth.json')
+INITIAL_PW_PATH = os.path.join(_DATA_DIR, '.initial_password')
 SECRET_PATH = os.path.join(_DATA_DIR, 'secret_key')
 
 # agent 心跳在该秒数内视为在线
@@ -163,28 +166,48 @@ def _gen_password(n=16):
 
 
 def ensure_auth():
-    """首次启动生成随机用户名和随机密码写入 auth.json；可用环境变量 PANEL_USER/PANEL_PASSWORD 覆盖。"""
+    """首次启动生成随机用户名和密码：auth.json 只存哈希（PANEL_USER/PANEL_PASSWORD
+    可覆盖）。初始密码另写 .initial_password（0600）供部署横幅显示一次；
+    忘记密码时删除 auth.json 重启即可重新生成。"""
     env_user = os.environ.get('PANEL_USER')
     env_pw = os.environ.get('PANEL_PASSWORD')
-    if os.path.exists(AUTH_PATH) and not env_user and not env_pw:
+    cur = _read_auth_file()
+    if cur and cur.get('password_hash') and not env_user and not env_pw:
         return
-    user = env_user or _gen_username()
-    pw = env_pw or _gen_password(16)
+    user = env_user or (cur or {}).get('user') or _gen_username()
+    if env_pw:
+        pw = env_pw
+    elif cur and cur.get('password'):
+        pw = str(cur['password'])      # 旧版明文凭据 → 迁移为哈希
+    else:
+        pw = _gen_password(16)
     with open(AUTH_PATH, 'w', encoding='utf-8') as f:
-        json.dump({'user': user, 'password': pw}, f, ensure_ascii=False)
+        json.dump({'user': user, 'password_hash': generate_password_hash(pw)},
+                  f, ensure_ascii=False)
     try:
         os.chmod(AUTH_PATH, 0o600)
     except OSError:
         pass
+    if not env_pw:
+        with open(INITIAL_PW_PATH, 'w', encoding='utf-8') as f:
+            f.write(pw)
+        try:
+            os.chmod(INITIAL_PW_PATH, 0o600)
+        except OSError:
+            pass
+
+
+def _read_auth_file():
+    try:
+        with open(AUTH_PATH, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def get_auth():
-    try:
-        with open(AUTH_PATH, encoding='utf-8') as f:
-            d = json.load(f)
-        return str(d.get('user') or 'admin'), str(d.get('password') or '')
-    except Exception:
-        return 'admin', ''
+    d = _read_auth_file() or {}
+    return str(d.get('user') or 'admin'), str(d.get('password_hash') or '')
 
 
 def get_secret_key():

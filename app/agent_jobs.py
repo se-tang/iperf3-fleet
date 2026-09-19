@@ -45,11 +45,13 @@ fi
 
 # 每轮测试开始：清掉旧进程后启动 iperf3 -s（也用于通道内掉线自愈重启）
 # 用 PID 文件管理进程，不硬依赖 pgrep/pkill（后者仅作为残留进程的补充清扫）
+# timeout 1800：server 30 分钟自过期，防止面板崩溃/任务中断后残留进程被扫描器滥用
+# （过期后若有后续测试，通道内端口预检失败会自动重启 server）
 SCRIPT_START_SERVER = r'''
 [ -f /tmp/iperf3-server.pid ] && kill "$(cat /tmp/iperf3-server.pid)" 2>/dev/null
 command -v pkill >/dev/null 2>&1 && pkill -f 'iperf3 -s' 2>/dev/null
 sleep 0.5
-nohup iperf3 -s > /tmp/iperf3-server.log 2>&1 &
+nohup timeout 1800 iperf3 -s > /tmp/iperf3-server.log 2>&1 &
 echo $! > /tmp/iperf3-server.pid
 sleep 1
 if kill -0 "$(cat /tmp/iperf3-server.pid)" 2>/dev/null; then

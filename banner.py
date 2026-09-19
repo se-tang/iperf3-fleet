@@ -4,7 +4,7 @@ import os
 import urllib.request
 
 port = os.environ.get('PANEL_PORT', '8080')
-auth_path = os.path.join(os.environ.get('DATA_DIR', '/data'), 'auth.json')
+data_dir = os.environ.get('DATA_DIR', '/data')
 
 ip = ''
 try:
@@ -14,10 +14,13 @@ except Exception:
 
 user, pw = '', ''
 try:
-    with open(auth_path, encoding='utf-8') as f:
-        d = json.load(f)
-    user = d.get('user') or ''
-    pw = d.get('password') or ''
+    with open(os.path.join(data_dir, 'auth.json'), encoding='utf-8') as f:
+        user = json.load(f).get('user') or 'admin'
+except Exception:
+    pass
+try:
+    with open(os.path.join(data_dir, '.initial_password'), encoding='utf-8') as f:
+        pw = f.read().strip()
 except Exception:
     pass
 
@@ -29,6 +32,6 @@ print(f"""
  ✅  iperf3-fleet 面板已部署成功！
      面板地址:  http://{ip}:{port}
      登录账号:  {user or '（见 auth.json）'}
-     登录密码:  {pw or '（见 auth.json）'}
+     登录密码:  {pw or '（首次部署时已显示；忘记可删除 auth.json 重启重新生成）'}
  下一步: 打开面板 → 添加机器 → 复制接入命令到机器上执行
 ==================================================""", flush=True)
