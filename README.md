@@ -9,6 +9,19 @@ git clone https://github.com/se-tang/iperf3-fleet.git && cd iperf3-fleet && ([ -
 ```
 
 - 端口随机生成（记录在 `.env`，升级/重启不变），登录账号密码随机生成，均在部署横幅里显示。
+- 面板容器默认只读文件系统 + 最小权限运行。
+
+## HTTPS（可选）
+
+在 `.env` 追加域名后启用 tls profile，证书自动签发：
+
+```bash
+echo "PANEL_DOMAIN=panel.example.com" >> .env
+echo "PANEL_COOKIE_SECURE=1" >> .env
+docker compose --profile tls up -d
+```
+
+访问 `https://panel.example.com`；面板机需放行 80/443。确认 HTTPS 正常后可删除 compose 里的 `ports` 端口映射关闭 HTTP 直连。
 
 ## 使用
 

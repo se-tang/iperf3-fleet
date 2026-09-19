@@ -1,0 +1,3 @@
+{$PANEL_DOMAIN} {
+	reverse_proxy iperf3-fleet:8000
+}

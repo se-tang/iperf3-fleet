@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY entrypoint.sh banner.py ./
-RUN chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh && python -m compileall -q /app/app
 
 ENV DATA_DIR=/data
 VOLUME /data
