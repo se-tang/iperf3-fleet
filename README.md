@@ -59,10 +59,16 @@ docker compose --profile tls up -d
 ## 升级
 
 ```bash
-cd ~/iperf3-fleet && git pull && ([ -d Caddyfile.local ] && rm -rf Caddyfile.local || true) && ([ -f Caddyfile.local ] || cp -T Caddyfile.acme Caddyfile.local) && docker compose up -d --build
+cd ~/iperf3-fleet && git pull && docker compose --profile tls up -d --build
 ```
 
-数据、机器接入关系、端口全部保留，Agent 自动重连。
+数据、机器接入关系、端口全部保留，Agent 自动重连，登录密码不变。
+
+若升级时 caddy 报 `path does not exist`，说明之前的误挂载产生了同名目录，清一次即可：
+
+```bash
+rm -rf ~/iperf3-fleet/Caddyfile.local && cp -T ~/iperf3-fleet/Caddyfile.acme ~/iperf3-fleet/Caddyfile.local && docker compose --profile tls up -d
+```
 
 ## 卸载
 
