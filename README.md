@@ -16,7 +16,7 @@ git clone https://github.com/se-tang/iperf3-fleet.git && cd iperf3-fleet && ([ -
 **方式 A：80/443 空闲** — Caddy 自动签发证书：
 
 ```bash
-cd ~/iperf3-fleet && git pull && cp Caddyfile.acme Caddyfile.local && docker compose --profile tls up -d
+cd ~/iperf3-fleet && git pull && cp -T Caddyfile.acme Caddyfile.local && docker compose --profile tls up -d
 ```
 
 **方式 B：80/443 被占用 + Cloudflare 橙云** — 用 Cloudflare 源证书（15 年有效，无需续期）：
@@ -26,7 +26,7 @@ cd ~/iperf3-fleet && git pull && cp Caddyfile.acme Caddyfile.local && docker com
 
 ```bash
 cd ~/iperf3-fleet
-cp Caddyfile.origin Caddyfile.local
+cp -T Caddyfile.origin Caddyfile.local
 echo "CADDY_HTTPS=8443" >> .env
 echo "PANEL_COOKIE_SECURE=1" >> .env
 docker compose --profile tls up -d
@@ -36,6 +36,8 @@ docker compose --profile tls up -d
 4. Cloudflare **SSL/TLS → 概述** 模式设为 **完全（严格）/ Full (strict)**
 
 之后访问 `https://panel.example.com`。
+
+> 若之前在未创建 `Caddyfile.local` 时启动过容器，Docker 会把它误建成一个**目录**（`ls -la` 显示为 `drwxr-xr-x`）。先 `rm -rf Caddyfile.local` 再重新执行上面的 `cp -T` 即可。
 
 确认 HTTPS 正常后，在 `.env` 追加 `PANEL_BIND=127.0.0.1` 并 `docker compose up -d`，关闭公网 HTTP 直连（面板与 Agent 均走域名接入）。
 方式 B 下 Agent 真实 IP 取自 CF-Connecting-IP，**源站防火墙/安全组务必只放行 Cloudflare 回源网段**（https://www.cloudflare.com/ips/），否则能直连 Caddy 的人可自带该头伪造 agent_ip。
@@ -57,7 +59,7 @@ docker compose --profile tls up -d
 ## 升级
 
 ```bash
-cd ~/iperf3-fleet && git pull && ([ -f Caddyfile.local ] || cp Caddyfile.acme Caddyfile.local) && docker compose up -d --build
+cd ~/iperf3-fleet && git pull && ([ -d Caddyfile.local ] && rm -rf Caddyfile.local || true) && ([ -f Caddyfile.local ] || cp -T Caddyfile.acme Caddyfile.local) && docker compose up -d --build
 ```
 
 数据、机器接入关系、端口全部保留，Agent 自动重连。

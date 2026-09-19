@@ -47,7 +47,12 @@ services:
     environment:
       PANEL_DOMAIN: ${PANEL_DOMAIN:-}
     volumes:
-      - ./Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: ./Caddyfile.local
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
       - ./certs:/certs:ro
       - caddy_data:/data
       - caddy_config:/config
