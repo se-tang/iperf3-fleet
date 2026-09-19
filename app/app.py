@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, session
 
-from . import db, runner
+from . import db, quality, runner
 
 APP_VERSION = '2.5.0'
 
@@ -328,6 +328,8 @@ def api_run_detail(rid):
     items = db.get_run_items(rid)
     for it in items:
         it['metrics_obj'] = json.loads(it['metrics']) if it['metrics'] else None
+    # 报告文本统一脱敏（覆盖历史报告）
+    run['report'] = quality.mask_report_text(run['report'])
     return jsonify({'run': run, 'items': items, 'log': runner.get_log(rid)})
 
 
@@ -354,7 +356,7 @@ def api_run_report(rid):
     if not run:
         return jsonify({'error': '测试记录不存在'}), 404
     return Response(
-        run['report'] or '',
+        quality.mask_report_text(run['report'] or ''),
         mimetype='text/markdown; charset=utf-8',
         headers={'Content-Disposition': f'attachment; filename=iperf3-report-{rid}.md'})
 

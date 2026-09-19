@@ -229,6 +229,16 @@ def mask_ip(ip):
     return ip
 
 
+# 兜底打码：对整份报告文本生效，覆盖历史报告与原始数据中残留的 IP
+_IPV4_RE = re.compile(r'\b(\d{1,3}\.\d{1,3})\.\d{1,3}\.\d{1,3}\b')
+
+
+def mask_report_text(text):
+    if not text:
+        return text
+    return _IPV4_RE.sub(r'\1.*.*', text)
+
+
 def build_report(run, target, items):
     """生成 Markdown 报告：汇总表（含线路质量评价列）+ 每台机器的原始摘录。"""
     lines = []
@@ -279,4 +289,4 @@ def build_report(run, target, items):
     if run.get('error'):
         lines.append('')
         lines.append(f"> ⚠️ {run['error']}")
-    return '\n'.join(lines)
+    return mask_report_text('\n'.join(lines))

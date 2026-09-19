@@ -32,10 +32,10 @@ echo "PANEL_COOKIE_SECURE=1" >> .env
 docker compose --profile tls up -d
 ```
 
-3. Cloudflare **Rules → Origin Rules**（或 Rules → Overview → Create rule → Origin Rule）建一条规则：Hostname equals `panel.209191.xyz` → Destination Port rewrite to `8443`
+3. Cloudflare **Rules → Origin Rules**（或 Rules → Overview → Create rule → Origin Rule）建一条规则：Hostname equals `panel.example.com` → Destination Port rewrite to `8443`
 4. Cloudflare **SSL/TLS → 概述** 模式设为 **完全（严格）/ Full (strict)**
 
-之后访问 `https://panel.209191.xyz`。确认 HTTPS 正常后可删 compose 里的 `ports` 端口映射关闭 HTTP 直连。
+之后访问 `https://panel.example.com`。确认 HTTPS 正常后可删 compose 里的 `ports` 端口映射关闭 HTTP 直连。
 
 ## 使用
 
