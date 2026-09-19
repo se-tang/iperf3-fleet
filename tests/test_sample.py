@@ -102,38 +102,48 @@ def test_report():
 
 
 def test_xff_and_limiter():
-    """XFF 取尾项（防伪造绕过限速/伪造 agent_ip）+ 登录锁定为真实 300 秒。"""
+    """CF-Connecting-IP 优先（CF 前置场景）+ XFF 取尾项 + 伪造不可绕过限速。"""
     from app import db
     from app.app import app as flask_app
     db.init_db()
     c = flask_app.test_client()
 
+    # 1) CF 前置：CF-Connecting-IP 最可信（即便 XFF 是别的值）
     m = db.create_machine({'name': 'xff', 'role': 'backend', 'region': '', 'bandwidth': ''})
-    # Caddy 追加语义：伪造头在前、真实 IP 在后 → 必须取最后一项
     c.post('/api/agent/heartbeat',
-           headers={'X-Agent-Token': m['token'], 'X-Forwarded-For': '1.2.3.4, 203.0.113.7'},
+           headers={'X-Agent-Token': m['token'],
+                    'CF-Connecting-IP': '203.0.113.7',
+                    'X-Forwarded-For': '1.2.3.4'},
            environ_base={'REMOTE_ADDR': '127.0.0.1'})
     assert db.get_machine(m['id'])['agent_ip'] == '203.0.113.7'
 
-    # 公网直连伪造 XFF → 不采信，取 remote_addr（93.184.216.34 为公网 IP）
+    # 2) 无 CF 头：Caddy 覆盖式 XFF（伪造头已被 Caddy 剥掉）→ 取最后一项
+    m1b = db.create_machine({'name': 'xff-caddy', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    c.post('/api/agent/heartbeat',
+           headers={'X-Agent-Token': m1b['token'], 'X-Forwarded-For': '203.0.113.7'},
+           environ_base={'REMOTE_ADDR': '127.0.0.1'})
+    assert db.get_machine(m1b['id'])['agent_ip'] == '203.0.113.7'
+
+    # 3) 公网直连伪造 XFF/CF 头 → 一律不采信，取 remote_addr
     m2 = db.create_machine({'name': 'xff2', 'role': 'backend', 'region': '', 'bandwidth': ''})
     c.post('/api/agent/heartbeat',
-           headers={'X-Agent-Token': m2['token'], 'X-Forwarded-For': '6.6.6.6'},
+           headers={'X-Agent-Token': m2['token'], 'X-Forwarded-For': '6.6.6.6',
+                    'CF-Connecting-IP': '7.7.7.7'},
            environ_base={'REMOTE_ADDR': '93.184.216.34'})
     assert db.get_machine(m2['id'])['agent_ip'] == '93.184.216.34'
 
-    # 限速不可被伪造 XFF 轮换绕过：5 次失败（伪首项各不相同）后锁定
+    # 4) 限速桶用 remote_addr：轮换伪造头无法绕过，5 次失败即锁定
     for i in range(5):
         c.post('/api/login',
-               headers={'X-Forwarded-For': f'10.0.0.{i}, 203.0.113.99'},
+               headers={'X-Forwarded-For': f'10.0.0.{i}', 'CF-Connecting-IP': f'10.1.1.{i}'},
                environ_base={'REMOTE_ADDR': '127.0.0.1'},
                json={'user': 'x', 'password': 'y'})
     resp = c.post('/api/login',
-                  headers={'X-Forwarded-For': '10.9.9.9, 203.0.113.99'},
+                  headers={'X-Forwarded-For': '10.9.9.9', 'CF-Connecting-IP': '10.1.1.99'},
                   environ_base={'REMOTE_ADDR': '127.0.0.1'},
                   json={'user': 'x', 'password': 'y'})
     assert resp.status_code == 429, resp.get_data(as_text=True)
-    print('XFF 取尾项 + 直连忽略伪造 + 限速不可绕过 OK')
+    print('CF-Connecting-IP 优先 / XFF 取尾项 / 伪造不可信 / 限速不可绕过 OK')
 
 
 if __name__ == '__main__':

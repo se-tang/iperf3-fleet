@@ -47,23 +47,33 @@ _lf_lock = threading.Lock()
 
 
 def _client_ip():
-    """真实客户端 IP：直连取 remote_addr；经反代（remote 为内网 IP 且带
-    X-Forwarded-For）时取 XFF **最后一项**——Caddy 等代理把真实客户端 IP
-    追加到末尾，取首项会被请求自带的伪造头欺骗（限速绕过/agent_ip 伪造）。"""
+    """Agent 真实来源 IP（决定测速目标可达性的关键）：
+    - 经 Cloudflare：CF-Connecting-IP 由 CF 强制写入、不可伪造，最可信；
+    - 经 Caddy 直连：Caddy 已用 header_up 把 XFF 覆盖为对端 IP，取 XFF 最后一项；
+    - 仅当 remote 为内网（反代后面）才采信以上头，公网直连一律用 remote_addr，
+      防止直连方伪造头伪造 agent_ip / 绕过限速。"""
     ra = request.remote_addr or ''
     ip = ra
     try:
         behind_proxy = ipaddress.ip_address(ra).is_private
     except ValueError:
         behind_proxy = False
-    xff = request.headers.get('X-Forwarded-For', '')
-    if behind_proxy and xff:
-        last = xff.split(',')[-1].strip()
-        try:
-            ipaddress.ip_address(last)
-            ip = last
-        except ValueError:
-            pass
+    if behind_proxy:
+        cfip = request.headers.get('CF-Connecting-IP', '').strip()
+        if cfip:
+            try:
+                ipaddress.ip_address(cfip)
+                return cfip[:64]
+            except ValueError:
+                pass
+        xff = request.headers.get('X-Forwarded-For', '')
+        if xff:
+            last = xff.split(',')[-1].strip()
+            try:
+                ipaddress.ip_address(last)
+                ip = last
+            except ValueError:
+                pass
     try:
         ipaddress.ip_address(ip)
     except ValueError:
@@ -156,7 +166,9 @@ def login_page():
 
 @app.post('/api/login')
 def api_login():
-    ip = _client_ip()
+    # 限速桶固定用 remote_addr：不采信可被伪造的转发头，
+    # 经反代时所有登录共享同一桶（单管理员场景可接受，宁紧勿松）
+    ip = request.remote_addr or '?'
     locked = _login_locked_seconds(ip)
     if locked:
         return jsonify({'error': f'失败次数过多，已锁定，请 {locked} 秒后再试'}), 429

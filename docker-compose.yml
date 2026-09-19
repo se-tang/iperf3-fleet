@@ -6,7 +6,8 @@ services:
     restart: unless-stopped
     ports:
       # 对外端口在首次部署时随机生成并记录在 .env（PANEL_PORT=xxxx），升级/重启不变
-      - "${PANEL_PORT:-8088}:8000"
+      # 启用 HTTPS 后建议在 .env 加 PANEL_BIND=127.0.0.1 关闭公网 HTTP 直连（Agent 走域名）
+      - "${PANEL_BIND:-0.0.0.0}${PANEL_PORT:-8088}:8000"
     environment:
       TZ: Asia/Shanghai
       DATA_DIR: /data
