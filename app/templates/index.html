@@ -324,6 +324,7 @@ function openMachineForm(m) {
   $('mStepForm').classList.remove('hidden');
   $('mStepAgent').classList.add('hidden');
   stopAgentPoll();
+  agentMachine = null;
   $('modal').classList.remove('hidden');
   $('mName').focus();
 }
@@ -352,7 +353,6 @@ function showAgentStep(m) {
 function stopAgentPoll() {
   clearInterval(agentTimer);
   agentTimer = null;
-  agentMachine = null;
 }
 
 async function pollAgent() {
@@ -385,6 +385,7 @@ function showAgentCmd(id) {
 function closeModal() {
   $('modal').classList.add('hidden');
   stopAgentPoll();
+  agentMachine = null;
 }
 
 async function saveMachine() {

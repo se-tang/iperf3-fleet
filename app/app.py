@@ -61,6 +61,9 @@ def security_headers(resp):
     resp.headers['X-Content-Type-Options'] = 'nosniff'
     resp.headers['X-Frame-Options'] = 'DENY'
     resp.headers['Referrer-Policy'] = 'no-referrer'
+    # HTML 页面禁止浏览器缓存，保证升级后面板脚本立即更新
+    if resp.mimetype == 'text/html':
+        resp.headers['Cache-Control'] = 'no-cache'
     return resp
 
 

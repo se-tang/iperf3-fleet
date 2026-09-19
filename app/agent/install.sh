@@ -7,7 +7,12 @@ PANEL_URL="${1:-}"
 TOKEN="${2:-}"
 SIGN_KEY="${3:-}"
 if [ -z "$PANEL_URL" ] || [ -z "$TOKEN" ] || [ -z "$SIGN_KEY" ]; then
-  echo "用法: curl -fsSL http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌 签名密钥"
+  if [ -n "$PANEL_URL" ] && [ -n "$TOKEN" ] && [ -z "$SIGN_KEY" ]; then
+    echo "❌ 检测到旧版接入命令（缺少第 3 个参数「签名密钥」）"
+    echo "   请回到面板 → 机器管理 → 「接入命令」，重新复制最新的接入命令后执行。"
+  else
+    echo "用法: curl -fsSL http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌 签名密钥"
+  fi
   exit 1
 fi
 case "$PANEL_URL" in http://*|https://*) ;; *) PANEL_URL="http://$PANEL_URL" ;; esac
