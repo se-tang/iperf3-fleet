@@ -35,7 +35,11 @@ docker compose --profile tls up -d
 3. Cloudflare **Rules → Origin Rules**（或 Rules → Overview → Create rule → Origin Rule）建一条规则：Hostname equals `panel.example.com` → Destination Port rewrite to `8443`
 4. Cloudflare **SSL/TLS → 概述** 模式设为 **完全（严格）/ Full (strict)**
 
-之后访问 `https://panel.example.com`。确认 HTTPS 正常后可删 compose 里的 `ports` 端口映射关闭 HTTP 直连。
+之后访问 `https://panel.example.com`。
+
+确认 HTTPS 正常后，在 `.env` 追加 `PANEL_BIND=127.0.0.1` 并 `docker compose up -d`，关闭公网 HTTP 直连（面板与 Agent 均走域名接入，Agent 真实 IP 由 `CF-Connecting-IP` 传递）。
+
+注意：登录限速按来源 IP 计，经反代部署时所有登录共享同一桶——他人 5 次失败会短暂锁住登录页（300 秒）。
 
 ## 使用
 
@@ -44,6 +48,10 @@ docker compose --profile tls up -d
 3. 完成后复制/下载 Markdown 报告（丢包、RTT、抖动、上下行、重传、线路质量评价 + 每台原始数据）。删除机器会自动卸载其 Agent。
 
 注意：目标机放行 `5201/TCP` 与 ICMP（安全组建议仅放行后端机 IP，防扫描盗刷流量）；面板机放行 `.env` 里的端口；跨公网建议套 HTTPS 反代。
+
+## 仓库贡献
+
+执行 `git config core.hooksPath hooks` 启用防呆钩子：拦截 `data*/`、`auth.json`、`secret_key`、`panel.db*` 及疑似密钥内容的提交。
 
 ## 升级
 

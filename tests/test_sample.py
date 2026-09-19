@@ -108,19 +108,22 @@ def test_xff_and_limiter():
     db.init_db()
     c = flask_app.test_client()
 
-    # 1) CF 前置：CF-Connecting-IP 最可信（即便 XFF 是别的值）
+    # 1) CF 直连（remote 属于 CF 网段）：CF-Connecting-IP 最可信
     m = db.create_machine({'name': 'xff', 'role': 'backend', 'region': '', 'bandwidth': ''})
     c.post('/api/agent/heartbeat',
            headers={'X-Agent-Token': m['token'],
                     'CF-Connecting-IP': '203.0.113.7',
                     'X-Forwarded-For': '1.2.3.4'},
-           environ_base={'REMOTE_ADDR': '127.0.0.1'})
+           environ_base={'REMOTE_ADDR': '172.70.0.5'})
     assert db.get_machine(m['id'])['agent_ip'] == '203.0.113.7'
 
-    # 2) 无 CF 头：Caddy 覆盖式 XFF（伪造头已被 Caddy 剥掉）→ 取最后一项
+    # 2) Caddy 反代（remote 为内网、非 CF 网段）：自带/走私的 CF 头必须被忽略，
+    #    以 Caddy 覆盖后的 XFF 为准
     m1b = db.create_machine({'name': 'xff-caddy', 'role': 'backend', 'region': '', 'bandwidth': ''})
     c.post('/api/agent/heartbeat',
-           headers={'X-Agent-Token': m1b['token'], 'X-Forwarded-For': '203.0.113.7'},
+           headers={'X-Agent-Token': m1b['token'],
+                    'CF-Connecting-IP': '9.9.9.9',
+                    'X-Forwarded-For': '203.0.113.7'},
            environ_base={'REMOTE_ADDR': '127.0.0.1'})
     assert db.get_machine(m1b['id'])['agent_ip'] == '203.0.113.7'
 
