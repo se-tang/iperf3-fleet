@@ -279,7 +279,8 @@ function copyFallback(text, done) {
 /* ---------------- 机器管理 ---------------- */
 
 async function loadMachines() {
-  MACHINES = await api('/api/machines');
+  // 时间戳参数防缓存：即使浏览器忽略 no-cache 头，也不会用到升级前的旧数据
+  MACHINES = await api('/api/machines?_=' + Date.now());
   renderMachines();
   renderRunForm();
 }
@@ -333,7 +334,7 @@ function buildAgentCmd() {
   if (!agentMachine) return '';
   let url = $('agentPanelUrl').value.trim().replace(/\/+$/, '');
   if (url && !/^https?:\/\//.test(url)) url = 'http://' + url;
-  return `curl -fsSL ${url}/agent/install.sh | bash -s -- ${url} ${agentMachine.token}`;
+  return `curl -fsSL ${url}/agent/install.sh | bash -s -- ${url} ${agentMachine.token} ${agentMachine.sign_key}`;
 }
 
 function showAgentStep(m) {
@@ -358,7 +359,7 @@ function stopAgentPoll() {
 async function pollAgent() {
   if (!agentMachine) return;
   let m;
-  try { m = await api(`/api/machines/${agentMachine.id}`); } catch (e) { return; }
+  try { m = await api(`/api/machines/${agentMachine.id}?_=${Date.now()}`); } catch (e) { return; }
   if (m.online) {
     $('agentWait').innerHTML = `<span style="color:var(--green)">✅ Agent 已上线（${esc(m.agent_ip || '')} ${esc(m.hostname || '')}）</span>`;
     $('agentDoneBtn').classList.remove('hidden');
