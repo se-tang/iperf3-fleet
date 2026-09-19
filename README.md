@@ -13,15 +13,29 @@ git clone https://github.com/se-tang/iperf3-fleet.git && cd iperf3-fleet && ([ -
 
 ## HTTPS（可选）
 
-在 `.env` 追加域名后启用 tls profile，证书自动签发：
+**方式 A：80/443 空闲** — Caddy 自动签发证书，部署命令执行完即可：
 
 ```bash
-echo "PANEL_DOMAIN=panel.example.com" >> .env
+cd ~/iperf3-fleet && git pull && docker compose --profile tls up -d
+```
+
+**方式 B：80/443 被占用 + Cloudflare 橙云** — 用 Cloudflare 源证书（15 年有效，无需续期）：
+
+1. Cloudflare → SSL/TLS → **源服务器（Origin Server）** → 创建证书 → 把显示的证书和私钥分别存为面板机 `~/iperf3-fleet/certs/origin.pem`、`origin.key`
+2. 切换 Caddy 配置并改端口（443 被占时用 8443）：
+
+```bash
+cd ~/iperf3-fleet
+cp Caddyfile.origin Caddyfile
+echo "CADDY_HTTPS=8443" >> .env
 echo "PANEL_COOKIE_SECURE=1" >> .env
 docker compose --profile tls up -d
 ```
 
-访问 `https://panel.example.com`；面板机需放行 80/443。确认 HTTPS 正常后可删除 compose 里的 `ports` 端口映射关闭 HTTP 直连。
+3. Cloudflare **Rules → Origin Rules**（或 Rules → Overview → Create rule → Origin Rule）建一条规则：Hostname equals `panel.209191.xyz` → Destination Port rewrite to `8443`
+4. Cloudflare **SSL/TLS → 概述** 模式设为 **完全（严格）/ Full (strict)**
+
+之后访问 `https://panel.209191.xyz`。确认 HTTPS 正常后可删 compose 里的 `ports` 端口映射关闭 HTTP 直连。
 
 ## 使用
 
