@@ -40,8 +40,9 @@ services:
     profiles: ["tls"]
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      # 80/443 被其他服务占用时，在 .env 里改 CADDY_HTTP / CADDY_HTTPS
+      - "${CADDY_HTTP:-80}:80"
+      - "${CADDY_HTTPS:-443}:443"
     environment:
       PANEL_DOMAIN: ${PANEL_DOMAIN:-}
     volumes:
