@@ -1,3 +1,6 @@
 {$PANEL_DOMAIN} {
-	reverse_proxy iperf3-fleet:8000
+	reverse_proxy iperf3-fleet:8000 {
+		# 覆盖而非追加 XFF：请求自带的伪造头到不了面板
+		header_up X-Forwarded-For {http.request.remote.host}
+	}
 }

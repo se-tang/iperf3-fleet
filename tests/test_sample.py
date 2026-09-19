@@ -101,9 +101,45 @@ def test_report():
     return report
 
 
+def test_xff_and_limiter():
+    """XFF 取尾项（防伪造绕过限速/伪造 agent_ip）+ 登录锁定为真实 300 秒。"""
+    from app import db
+    from app.app import app as flask_app
+    db.init_db()
+    c = flask_app.test_client()
+
+    m = db.create_machine({'name': 'xff', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    # Caddy 追加语义：伪造头在前、真实 IP 在后 → 必须取最后一项
+    c.post('/api/agent/heartbeat',
+           headers={'X-Agent-Token': m['token'], 'X-Forwarded-For': '1.2.3.4, 203.0.113.7'},
+           environ_base={'REMOTE_ADDR': '127.0.0.1'})
+    assert db.get_machine(m['id'])['agent_ip'] == '203.0.113.7'
+
+    # 公网直连伪造 XFF → 不采信，取 remote_addr（93.184.216.34 为公网 IP）
+    m2 = db.create_machine({'name': 'xff2', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    c.post('/api/agent/heartbeat',
+           headers={'X-Agent-Token': m2['token'], 'X-Forwarded-For': '6.6.6.6'},
+           environ_base={'REMOTE_ADDR': '93.184.216.34'})
+    assert db.get_machine(m2['id'])['agent_ip'] == '93.184.216.34'
+
+    # 限速不可被伪造 XFF 轮换绕过：5 次失败（伪首项各不相同）后锁定
+    for i in range(5):
+        c.post('/api/login',
+               headers={'X-Forwarded-For': f'10.0.0.{i}, 203.0.113.99'},
+               environ_base={'REMOTE_ADDR': '127.0.0.1'},
+               json={'user': 'x', 'password': 'y'})
+    resp = c.post('/api/login',
+                  headers={'X-Forwarded-For': '10.9.9.9, 203.0.113.99'},
+                  environ_base={'REMOTE_ADDR': '127.0.0.1'},
+                  json={'user': 'x', 'password': 'y'})
+    assert resp.status_code == 429, resp.get_data(as_text=True)
+    print('XFF 取尾项 + 直连忽略伪造 + 限速不可绕过 OK')
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
     test_evaluate()
     test_report()
+    test_xff_and_limiter()
     print('\nALL TESTS PASSED')

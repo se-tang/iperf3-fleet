@@ -48,8 +48,8 @@ _lf_lock = threading.Lock()
 
 def _client_ip():
     """真实客户端 IP：直连取 remote_addr；经反代（remote 为内网 IP 且带
-    X-Forwarded-For）时取 XFF 首个合法 IP。仅在 remote 为私网时采信 XFF，
-    防止直连方伪造头绕过限速或伪造 agent_ip。"""
+    X-Forwarded-For）时取 XFF **最后一项**——Caddy 等代理把真实客户端 IP
+    追加到末尾，取首项会被请求自带的伪造头欺骗（限速绕过/agent_ip 伪造）。"""
     ra = request.remote_addr or ''
     ip = ra
     try:
@@ -58,10 +58,10 @@ def _client_ip():
         behind_proxy = False
     xff = request.headers.get('X-Forwarded-For', '')
     if behind_proxy and xff:
-        first = xff.split(',')[0].strip()
+        last = xff.split(',')[-1].strip()
         try:
-            ipaddress.ip_address(first)
-            ip = first
+            ipaddress.ip_address(last)
+            ip = last
         except ValueError:
             pass
     try:

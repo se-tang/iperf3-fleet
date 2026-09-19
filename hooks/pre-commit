@@ -1,0 +1,8 @@
+#!/bin/sh
+# 防呆钩子：禁止提交运行数据/密钥文件
+# 启用: git config core.hooksPath hooks
+if git diff --cached --name-only | grep -E '(^|/)(data(-[^/]*)?/|auth\.json$|secret_key$|\.initial_password$|panel\.db($|-))' >/dev/null; then
+  echo "❌ 提交被拒绝：包含运行数据/密钥文件（data*/auth.json/secret_key/panel.db*）"
+  echo "   如确认为误报，可用 git commit --no-verify 跳过"
+  exit 1
+fi

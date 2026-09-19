@@ -4,5 +4,7 @@
 
 :443 {
 	tls /certs/origin.pem /certs/origin.key
-	reverse_proxy iperf3-fleet:8000
+	reverse_proxy iperf3-fleet:8000 {
+		header_up X-Forwarded-For {http.request.remote.host}
+	}
 }
