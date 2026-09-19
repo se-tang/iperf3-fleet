@@ -207,12 +207,26 @@ def _row_online(m):
     return machine_online(m)
 
 
+def _fill_sign_key(m):
+    """兼容旧库自愈：机器缺签名密钥时即时补生成（正常情况下 init_db 迁移已补齐）。"""
+    if m and not m.get('sign_key'):
+        try:
+            sk = secrets.token_hex(32)
+            get_db().execute('UPDATE machines SET sign_key=? WHERE id=?', (sk, m['id']))
+            get_db().commit()
+            m['sign_key'] = sk
+        except Exception:
+            pass
+    return m
+
+
 def get_machines():
     rows = get_db().execute('SELECT * FROM machines ORDER BY id').fetchall()
     out = []
     for r in rows:
         m = dict(r)
-        m['online'] = _row_online(m)
+        m['online'] = machine_online(m)
+        _fill_sign_key(m)
         out.append(m)
     return out
 
@@ -222,8 +236,8 @@ def get_machine(mid):
     if not r:
         return None
     m = dict(r)
-    m['online'] = _row_online(m)
-    return m
+    m['online'] = machine_online(m)
+    return _fill_sign_key(m)
 
 
 def get_machine_by_token(token):

@@ -63,8 +63,8 @@ def security_headers(resp):
     resp.headers['X-Content-Type-Options'] = 'nosniff'
     resp.headers['X-Frame-Options'] = 'DENY'
     resp.headers['Referrer-Policy'] = 'no-referrer'
-    # HTML 页面禁止浏览器缓存，保证升级后面板脚本立即更新
-    if resp.mimetype == 'text/html':
+    # 页面与 API 一律禁止浏览器缓存：升级后旧页面/旧数据不会再被使用
+    if resp.mimetype == 'text/html' or request.path.startswith('/api/'):
         resp.headers['Cache-Control'] = 'no-cache'
     return resp
 
