@@ -66,12 +66,10 @@ def _is_cloudflare_ip(ip):
 
 
 def _client_ip():
-    """Agent 真实来源 IP（决定测速目标可达性的关键）：
-    - remote 是 Cloudflare 网段（面板直挂 CF，无 Caddy）：CF-Connecting-IP 由 CF
-      强制写入、不可伪造，最可信；
-    - remote 是内网（Caddy 反代后面）：Caddy 已用 header_up 把 XFF 覆盖为对端
-      IP，取 XFF 最后一项；同时 Caddy 会剥掉直连方自带的 CF-Connecting-IP；
-    - 公网直连：一律用 remote_addr，防止伪造头伪造 agent_ip / 绕过限速。"""
+    """Agent 真实来源 IP。Caddy 以 trusted_proxies 声明 Cloudflare 回源网段，
+    并用 {http.request.client_ip} 把「穿透可信代理后算出的真实客户端 IP」
+    覆盖写入 XFF——因此面板只认 XFF 最后一项（请求自带/走私的伪造头位于
+    更早的位置，天然被忽略）；公网直连（无反代）一律用 remote_addr。"""
     ra = request.remote_addr or ''
     ip = ra
     try:
