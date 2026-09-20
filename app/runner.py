@@ -3,6 +3,10 @@
 流水线：iperf3 上/下行全局串行（多台同时测速会互相抢带宽，结果作废），
 ping 200 次不占测速通道，与后续机器的 iperf3 并行执行，充分利用等待时间。
 总时长 ≈ 环境准备 + 台数×25 秒 + 最后 200 秒。
+
+测试协议：默认 IPv4（两端都用 IPv4 地址，避免机器缺 IPv6 时失败）；
+用户确认双端都支持 IPv6 时可选择 IPv6 测试。地址取自机器资料
+（心跳观测 + 面板探测，见 db.machine_test_ip）。
 """
 import ipaddress
 import json
@@ -89,7 +93,13 @@ def get_log(run_id):
     return run['log'].splitlines() if run and run['log'] else []
 
 
-def start_run(target_id, backend_ids):
+def proto_name(ip_version):
+    return 'IPv6' if int(ip_version or 4) == 6 else 'IPv4'
+
+
+def start_run(target_id, backend_ids, ip_version=4):
+    ip_version = 6 if int(ip_version or 4) == 6 else 4
+    proto = proto_name(ip_version)
     with _state_lock:
         if _active:
             raise RuntimeError('已有测试任务正在运行，请等待完成或先停止')
@@ -102,15 +112,21 @@ def start_run(target_id, backend_ids):
             raise RuntimeError('请至少选择一台后端机器')
         if not db.machine_online(target):
             raise RuntimeError('目标机器的 Agent 未上线，请先在该机器上执行接入命令并等待其上线')
+        # 测试地址：默认 IPv4；勾选 IPv6 后使用目标机的 IPv6 地址
+        target_ip = db.machine_test_ip(target, ip_version)
+        if not target_ip:
+            raise RuntimeError(
+                f'目标机器「{target["name"]}」还没有 {proto} 地址，无法进行 {proto} 测试'
+                f'（可在机器管理里点「探测地址」重试，或确认该机器有 {proto} 出口）')
         for bid in backend_ids:
             m = db.get_machine(bid)
             if not m:
                 raise RuntimeError(f'后端机器 #{bid} 不存在')
             if m['role'] != 'backend':
                 raise RuntimeError(f'机器「{m["name"]}」的角色不是「后端机器」，不能作为后端参加测试')
-        run_id = db.create_run(target, backend_ids)
+        run_id = db.create_run(target, backend_ids, ip_version, target_host=target_ip)
         _active[run_id] = {'stop': False, 'log': []}
-    threading.Thread(target=_worker, args=(run_id, target), daemon=True).start()
+    threading.Thread(target=_worker, args=(run_id, target, ip_version), daemon=True).start()
     return run_id
 
 
@@ -144,7 +160,7 @@ def _job(machine, cmd, timeout, log, stop_check):
         time.sleep(0.8)
 
 
-def _worker(run_id, target):
+def _worker(run_id, target, ip_version=4):
     st = _active[run_id]
     log_lines = st['log']
 
@@ -161,8 +177,20 @@ def _worker(run_id, target):
     threads = []
     status = 'finished'
     error = ''
+    proto = proto_name(ip_version)
     try:
-        log(f"=== 测试开始 | 目标机器: {target['name']} ({target['agent_ip'] or 'IP待agent上报'}) ===")
+        # 目标地址取自本次测试记录（创建时就已按协议选定并写入），这里只做防御性校验
+        run = db.get_run(run_id) or {}
+        target_ip = (run.get('target_host') or '').strip()
+        try:
+            addr = ipaddress.ip_address(target_ip)
+        except ValueError:
+            raise RuntimeError(
+                f'目标机地址无效（{target_ip!r}），请点击机器管理里的「探测地址」后重试')
+        if addr.version != ip_version:
+            raise RuntimeError(
+                f'目标机地址 {target_ip} 与所选协议 {proto} 不一致，请重新选择后再试')
+        log(f"=== 测试开始 | 目标机器: {target['name']} ({target_ip}) | 协议: {proto} ===")
         log('[目标] 通过 Agent 检查/安装 iperf3 与 ping ...')
         code, out = _job(target, aj.SCRIPT_ENSURE, 600, log, stop_check)
         if code != 0:
@@ -171,13 +199,13 @@ def _worker(run_id, target):
         code, out = _job(target, aj.SCRIPT_START_SERVER, 30, log, stop_check)
         if code != 0:
             raise RuntimeError('目标机 iperf3 -s 启动失败: ' + (out or '').strip()[-300:])
-        log('[目标] iperf3 -s 已就绪（端口 5201），开始流水线测试：iperf3 串行 / ping 并行')
+        log(f'[目标] iperf3 -s 已就绪（端口 5201），开始流水线测试：iperf3 串行 / ping 并行')
 
         items = db.get_run_items(run_id)
         lane = Iperf3Lane()
         for idx, it in enumerate(items):
             t = threading.Thread(target=_run_backend,
-                                 args=(lane, st, log, stop_check, target, it, idx),
+                                 args=(lane, st, log, stop_check, target, it, idx, target_ip, proto),
                                  daemon=True)
             threads.append(t)
         for t in threads:
@@ -240,8 +268,11 @@ def _worker(run_id, target):
             _active.pop(run_id, None)
 
 
-def _run_backend(lane, st, log, stop_check, target, it, idx):
-    """单台后端的流水线：环境检查（并行）→ 等通道 → iperf3 上/下行（串行）→ ping（并行）。"""
+def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='IPv4'):
+    """单台后端的流水线：环境检查（并行）→ 等通道 → iperf3 上/下行（串行）→ ping（并行）。
+
+    iperf3 / ping 都用目标地址字面量决定协议族（IPv4 或 IPv6），不再依赖本机默认路由。
+    """
     iid = it['id']
     name = it['machine_name']
     db.update_item(iid, status='running', phase='检查环境')
@@ -259,7 +290,7 @@ def _run_backend(lane, st, log, stop_check, target, it, idx):
         if code != 0:
             raise RuntimeError('iperf3/ping 检查安装失败: ' + (out or '').strip()[-300:])
 
-        tq = target['agent_ip']
+        tq = target_ip
         # 防御性校验：目标地址必须是合法 IP，避免任何路径上的命令注入
         try:
             ipaddress.ip_address(tq)
@@ -281,11 +312,14 @@ def _run_backend(lane, st, log, stop_check, target, it, idx):
                     raise RuntimeError('目标机 iperf3 server 启动失败: ' + (out2 or '').strip()[-200:])
                 code, out = _job(m, aj.script_check_port(tq), 15, log, stop_check)
                 if code != 0:
-                    raise RuntimeError(f'目标机 {tq} 的 5201/TCP 从本机不可达（请检查目标机防火墙是否放行 5201）')
+                    extra = '；IPv6 测试需本机与目标机均具备 IPv6 连通性' if proto == 'IPv6' else ''
+                    raise RuntimeError(
+                        f'目标机 {tq} 的 5201/TCP 从本机不可达'
+                        f'（请检查目标机防火墙是否放行 5201{extra}）')
 
             cmd_up = f'iperf3 -c {shlex.quote(tq)} -t 10'
             db.update_item(iid, phase='上行测试')
-            log(f'[{name}] $ {cmd_up}')
+            log(f'[{name}] $ {cmd_up}   （{proto}）')
             code, up_raw = _job(m, cmd_up, 90, log, stop_check)
             if code != 0:
                 raise RuntimeError('上行测试失败: ' + (up_raw or '').strip()[-200:])
@@ -293,7 +327,7 @@ def _run_backend(lane, st, log, stop_check, target, it, idx):
 
             cmd_down = f'iperf3 -c {shlex.quote(tq)} -R -t 10'
             db.update_item(iid, phase='下行测试')
-            log(f'[{name}] $ {cmd_down}')
+            log(f'[{name}] $ {cmd_down}   （{proto}）')
             code, down_raw = _job(m, cmd_down, 90, log, stop_check)
             if code != 0:
                 raise RuntimeError('下行测试失败: ' + (down_raw or '').strip()[-200:])
@@ -329,3 +363,67 @@ def _run_backend(lane, st, log, stop_check, target, it, idx):
             # 失败/中止也要把轮次让出去，避免阻塞后面的机器
             if lane.acquire(idx):
                 lane.release()
+
+
+# ---------------- 地址探测（后台补齐机器的 IPv4 / IPv6） ----------------
+
+DISCOVER_COOLDOWN = 600   # 同一台机器两次自动探测的最小间隔（秒）
+_discover_next = {}       # machine_id -> 下次允许自动探测的时间戳
+
+
+def start_discovery_worker():
+    """启动后台线程：为地址不全的在线机器补一次本机地址探测。
+
+    走 Agent 任务队列（Agent 无需升级）：脚本只在本机查地址，不访问外网。
+    面板只监听 IPv4 时也能拿到机器的 IPv6，从而支持 IPv6 测试。
+    """
+    threading.Thread(target=_discovery_loop, daemon=True).start()
+
+
+def _discovery_loop():
+    while True:
+        try:
+            _discovery_pass()
+        except Exception:
+            pass
+        time.sleep(5)
+
+
+def _discovery_pass():
+    if active_run_id():
+        return                      # 测试进行中不打扰
+    now = time.time()
+    for m in db.get_machines():
+        if m['ip4'] and m['ip6']:
+            continue                # 两族地址都已知
+        if not db.machine_online(m):
+            continue
+        if now < _discover_next.get(m['id'], 0):
+            continue
+        _discover_next[m['id']] = now + DISCOVER_COOLDOWN
+        queue_discovery(m['id'])
+
+
+def queue_discovery(mid, force=False):
+    """异步派发一次地址探测（不阻塞请求线程）。force=True 时覆盖已存地址。"""
+    def run():
+        try:
+            found = discover_machine(mid, force=force)
+            print(f'[探测] 机器 #{mid} 地址: {found or "未获取到全局地址"}', flush=True)
+        except Exception as e:
+            print(f'[探测] 机器 #{mid} 失败: {e}', flush=True)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def discover_machine(mid, force=False):
+    """派发地址探测任务并解析结果。force=True 时用探测值覆盖已存地址（手动刷新）。"""
+    m = db.get_machine(mid)
+    if not m:
+        raise RuntimeError('机器不存在')
+    if not db.machine_online(m):
+        raise RuntimeError(f'机器「{m["name"]}」的 Agent 未上线，无法探测地址')
+    code, out = _job(m, aj.SCRIPT_REPORT_IPS, 20, lambda _s: None, None)
+    found = aj.parse_ip_report(out)
+    if found:
+        db.set_machine_ips(mid, found, force=force)
+    return found

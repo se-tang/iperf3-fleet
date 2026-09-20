@@ -241,12 +241,14 @@ def mask_report_text(text):
 
 def build_report(run, target, items):
     """生成 Markdown 报告：汇总表（含线路质量评价列）+ 每台机器的原始摘录。"""
+    proto = 'IPv6' if int(run.get('ip_version') or 4) == 6 else 'IPv4'
     lines = []
     lines.append('# iperf3 线路质量测试报告')
     lines.append('')
     lines.append(
         f"- **目标机器**：{target['name']}"
         f"（{target.get('region') or '地区未标记'} · {target.get('bandwidth') or '带宽未标记'} · `{mask_ip(target.get('host'))}`）")
+    lines.append(f"- **测试协议**：{proto}（后端发起端与目标被测端均使用 {proto}）")
     lines.append(f"- **测试时间**：{run['created_at']} ~ {run.get('finished_at') or ''}")
     lines.append('- **测试方式**：iperf3 单线程 10 秒 ×（上行 / 下行 -R）+ `ping -c 200 -i 1`；iperf3 全局串行，ping 与其它机器的 iperf3 并行')
     lines.append('')

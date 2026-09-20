@@ -1,5 +1,6 @@
 """SQLite 数据层 v2：机器（Agent 令牌接入）、任务队列、面板登录凭据。"""
 import datetime
+import ipaddress
 import json
 import os
 import secrets
@@ -47,6 +48,8 @@ CREATE TABLE IF NOT EXISTS machines (
     sign_key TEXT NOT NULL DEFAULT '',
     hostname TEXT NOT NULL DEFAULT '',
     agent_ip TEXT NOT NULL DEFAULT '',
+    ip4 TEXT NOT NULL DEFAULT '',
+    ip6 TEXT NOT NULL DEFAULT '',
     last_seen INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -57,6 +60,7 @@ CREATE TABLE IF NOT EXISTS runs (
     target_host TEXT NOT NULL DEFAULT '',
     target_region TEXT NOT NULL DEFAULT '',
     target_bandwidth TEXT NOT NULL DEFAULT '',
+    ip_version INTEGER NOT NULL DEFAULT 4,
     status TEXT NOT NULL DEFAULT 'running',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     finished_at TEXT,
@@ -117,6 +121,14 @@ def init_db():
     cols_m = [r['name'] for r in db.execute('PRAGMA table_info(machines)').fetchall()]
     if cols_m and 'sign_key' not in cols_m:
         db.execute("ALTER TABLE machines ADD COLUMN sign_key TEXT NOT NULL DEFAULT ''")
+    # v2.7：测试地址按协议族分开保存（agent_ip 仍是「最近一次心跳的来源 IP」）
+    if cols_m and 'ip4' not in cols_m:
+        db.execute("ALTER TABLE machines ADD COLUMN ip4 TEXT NOT NULL DEFAULT ''")
+    if cols_m and 'ip6' not in cols_m:
+        db.execute("ALTER TABLE machines ADD COLUMN ip6 TEXT NOT NULL DEFAULT ''")
+    cols_r = [r['name'] for r in db.execute('PRAGMA table_info(runs)').fetchall()]
+    if cols_r and 'ip_version' not in cols_r:
+        db.execute('ALTER TABLE runs ADD COLUMN ip_version INTEGER NOT NULL DEFAULT 4')
     for row in db.execute("SELECT id FROM machines WHERE sign_key=''").fetchall():
         db.execute('UPDATE machines SET sign_key=? WHERE id=?', (secrets.token_hex(32), row['id']))
     cols_tb = [r['name'] for r in db.execute('PRAGMA table_info(agent_tombstones)').fetchall()]
@@ -300,11 +312,62 @@ def regen_token(mid):
     return get_machine(mid)
 
 
+def ip_family(ip):
+    """IP 协议族：4 / 6；非法地址返回 None。"""
+    try:
+        return ipaddress.ip_address(str(ip)).version
+    except ValueError:
+        return None
+
+
+def machine_test_ip(m, ip_version=4):
+    """取该机器用于测试的地址（默认 IPv4）。"""
+    return (m.get('ip6') if int(ip_version or 4) == 6 else m.get('ip4')) or ''
+
+
 def touch_machine(mid, hostname, ip):
+    """记录心跳：agent_ip 存最近一次来源 IP；同时按协议族写入 ip4/ip6。
+
+    双栈面板下心跳来源可能是 v4 也可能是 v6，按族分别保存后就不会互相覆盖，
+    测试地址不会在两族之间跳动。
+    """
     db = get_db()
-    db.execute('UPDATE machines SET last_seen=?, hostname=?, agent_ip=? WHERE id=?',
-               (int(time.time()), (hostname or '')[:128], (ip or '')[:64], mid))
+    ip = (ip or '')[:64]
+    sets = ['last_seen=?', 'hostname=?', 'agent_ip=?']
+    args = [int(time.time()), (hostname or '')[:128], ip]
+    fam = ip_family(ip)
+    if fam == 4:
+        sets.append('ip4=?')
+        args.append(ip)
+    elif fam == 6:
+        sets.append('ip6=?')
+        args.append(ip)
+    args.append(mid)
+    db.execute('UPDATE machines SET ' + ', '.join(sets) + ' WHERE id=?', args)
     db.commit()
+    return get_machine(mid)
+
+
+def set_machine_ips(mid, values, force=False):
+    """写回面板探测到的地址。默认只补空缺（心跳观测到的地址更可信，不覆盖），
+    force=True 用于用户手动「探测地址」时的强制刷新。"""
+    db = get_db()
+    row = db.execute('SELECT ip4, ip6 FROM machines WHERE id=?', (mid,)).fetchone()
+    if not row:
+        return None
+    sets, args = [], []
+    for col in ('ip4', 'ip6'):
+        v = str(values.get(col) or '')[:64]
+        if not v:
+            continue
+        if not force and row[col]:
+            continue
+        sets.append(f'{col}=?')
+        args.append(v)
+    if sets:
+        args.append(mid)
+        db.execute('UPDATE machines SET ' + ', '.join(sets) + ' WHERE id=?', args)
+        db.commit()
     return get_machine(mid)
 
 
@@ -338,13 +401,15 @@ def pop_tombstone(token):
 
 # ---------------- runs ----------------
 
-def create_run(target, backend_ids):
+def create_run(target, backend_ids, ip_version=4, target_host=''):
     db = get_db()
+    ip_version = 6 if int(ip_version or 4) == 6 else 4
     cur = db.execute(
-        'INSERT INTO runs (target_id, target_name, target_host, target_region, target_bandwidth) '
-        'VALUES (?,?,?,?,?)',
-        (target['id'], target['name'], target['agent_ip'] or 'IP待agent上报',
-         target['region'], target['bandwidth']))
+        'INSERT INTO runs (target_id, target_name, target_host, target_region, target_bandwidth, '
+        'ip_version) VALUES (?,?,?,?,?,?)',
+        (target['id'], target['name'],
+         target_host or (target['agent_ip'] or 'IP待agent上报'),
+         target['region'], target['bandwidth'], ip_version))
     run_id = cur.lastrowid
     for bid in backend_ids:
         m = get_machine(bid)

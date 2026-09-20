@@ -160,10 +160,110 @@ def test_xff_and_limiter():
     print('CF-Connecting-IP 优先 / XFF 取尾项 / 伪造不可信 / 限速不可绕过 OK')
 
 
+def test_test_protocol():
+    """IPv4/IPv6 测试地址：心跳按协议族分别记录、探测结果只补空缺、报告标注协议。"""
+    import json as _json
+    from app import agent_jobs, db, runner
+
+    # 1) 双栈面板下心跳来源会在 v4 / v6 之间跳动：两族地址必须都留下，不能互相覆盖
+    m = db.create_machine({'name': 'dual', 'role': 'target', 'region': '', 'bandwidth': ''})
+    db.touch_machine(m['id'], 'dual', '93.184.216.34')
+    db.touch_machine(m['id'], 'dual', '2606:4700:4700::1111')
+    got = db.get_machine(m['id'])
+    assert got['ip4'] == '93.184.216.34', got
+    assert got['ip6'] == '2606:4700:4700::1111', got
+
+    # 2) 默认取 IPv4，只有显式要求时才取 IPv6
+    assert db.machine_test_ip(got, 4) == '93.184.216.34'
+    assert db.machine_test_ip(got, 6) == '2606:4700:4700::1111'
+
+    # 3) 探测结果只补空缺（心跳观测到的地址更可信），force=True 才覆盖
+    m2 = db.create_machine({'name': 'nat', 'role': 'target', 'region': '', 'bandwidth': ''})
+    db.touch_machine(m2['id'], 'nat', '93.184.216.34')          # NAT 后的公网出口
+    db.set_machine_ips(m2['id'], {'ip4': '10.0.0.5', 'ip6': '2606:4700:4700::1111'})
+    got2 = db.get_machine(m2['id'])
+    assert got2['ip4'] == '93.184.216.34', got2      # 私网探测值不覆盖观测值
+    assert got2['ip6'] == '2606:4700:4700::1111', got2
+    db.set_machine_ips(m2['id'], {'ip4': '93.184.216.99'}, force=True)
+    assert db.get_machine(m2['id'])['ip4'] == '93.184.216.99'
+
+    # 4) 探测输出解析：只收「协议族匹配 + 全局可路由」的地址
+    found = agent_jobs.parse_ip_report(
+        'IPV4=93.184.216.34\nIPV6=2606:4700:4700::1111\nIPV4=192.168.1.5\nIPV6=fd00::1\n')
+    assert found == {'ip4': '93.184.216.34', 'ip6': '2606:4700:4700::1111'}, found
+    assert agent_jobs.parse_ip_report('IPV4=2606:4700::1\nIPV6=93.184.216.34\n') == {}
+
+    # 5) 目标机缺 IPv6 时，IPv6 测试必须直接拒绝（而不是跑出一堆失败）
+    backend = db.create_machine({'name': 'be', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    db.touch_machine(backend['id'], 'be', '93.184.216.34')
+    only4 = db.create_machine({'name': 'only4', 'role': 'target', 'region': '', 'bandwidth': ''})
+    db.touch_machine(only4['id'], 'only4', '93.184.216.34')
+    try:
+        runner.start_run(only4['id'], [backend['id']], 6)
+        raise AssertionError('缺 IPv6 地址时不应允许 IPv6 测试')
+    except RuntimeError as e:
+        assert 'IPv6' in str(e), e
+    assert runner.active_run_id() is None
+
+    # 6) 报告标注测试协议，并按 IPv6 脱敏
+    run6 = {'created_at': 't0', 'finished_at': 't1', 'ip_version': 6, 'error': '',
+            'target_name': 'only6', 'target_host': '2606:4700:4700::1111'}
+    rep = quality.build_report(run6, {'name': 'only6', 'host': '2606:4700:4700::1111',
+                                      'region': '洛杉矶', 'bandwidth': '1G'}, [])
+    assert '- **测试协议**：IPv6' in rep, rep
+    assert '2606:4700:****' in rep and '1111' not in rep.split('测试协议')[0], rep
+    run4 = dict(run6, ip_version=4, target_host='93.184.216.34')
+    rep4 = quality.build_report(run4, {'name': 'v4', 'host': '93.184.216.34',
+                                        'region': '', 'bandwidth': ''}, [])
+    assert '- **测试协议**：IPv4' in rep4, rep4
+    assert '93.184.*.*' in rep4
+    print('测试协议 / 地址探测 / 报告标注 OK')
+
+
+def test_discovery_flow():
+    """端到端：面板派发地址探测任务 → Agent 回报 → 地址入库（走真实 Agent API 与签名任务）。"""
+    import threading
+    import time
+    from app import db, runner
+    from app.app import app as flask_app
+    db.init_db()
+    c = flask_app.test_client()
+
+    m = db.create_machine({'name': 'disc', 'role': 'target', 'region': '', 'bandwidth': ''})
+    db.touch_machine(m['id'], 'disc', '93.184.216.34')      # 只有 IPv4（心跳观测）
+
+    result = {}
+    t = threading.Thread(target=lambda: result.update(runner.discover_machine(m['id']) or {}),
+                         daemon=True)
+    t.start()
+    # 面板把探测任务排进队列后，模拟 Agent 领取并回传本机地址
+    job = None
+    for _ in range(100):
+        job = db.get_db().execute(
+            "SELECT * FROM jobs WHERE machine_id=? AND status='queued' ORDER BY id DESC",
+            (m['id'],)).fetchone()
+        if job:
+            break
+        time.sleep(0.05)
+    assert job, '面板未派发地址探测任务'
+    body = 'IPV4=93.184.216.34\nIPV6=2606:4700:4700::1111\n'
+    assert 'IPV4=' in job['cmd'] or 'IPV4' in job['cmd'], job['cmd']
+    c.post('/api/agent/output',
+           headers={'X-Agent-Token': m['token']},
+           data={'job_id': job['id'], 'text': body, 'done': '1', 'exit_code': '0'})
+    t.join(timeout=10)
+    got = db.get_machine(m['id'])
+    assert got['ip6'] == '2606:4700:4700::1111', got
+    assert got['ip4'] == '93.184.216.34', got
+    print('地址探测端到端 OK:', result)
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
     test_evaluate()
     test_report()
     test_xff_and_limiter()
+    test_test_protocol()
+    test_discovery_flow()
     print('\nALL TESTS PASSED')

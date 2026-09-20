@@ -112,11 +112,11 @@ summary{cursor:pointer;font-weight:600}
     </div>
     <div class="tbl-wrap">
     <table>
-      <thead><tr><th>状态</th><th>名称</th><th>角色</th><th>Agent IP</th><th>主机名</th><th>地区标记</th><th>带宽标记</th><th>操作</th></tr></thead>
+      <thead><tr><th>状态</th><th>名称</th><th>角色</th><th>测试地址</th><th>主机名</th><th>地区标记</th><th>带宽标记</th><th>操作</th></tr></thead>
       <tbody id="machinesBody"></tbody>
     </table>
     </div>
-    <p class="hint">目标=被测端（iperf3 -s，建议一台）；后端=发起端。接入命令需 root 执行。地区/带宽标记用于报告与质量评价。</p>
+    <p class="hint">目标=被测端（iperf3 -s，建议一台）；后端=发起端。接入命令需 root 执行。地区/带宽标记用于报告与质量评价。IPv4 / IPv6 测试地址由 Agent 接入后自动探测，可用「探测地址」手动刷新。</p>
   </section>
 
   <section class="card">
@@ -126,8 +126,14 @@ summary{cursor:pointer;font-weight:600}
       <b>后端机器：</b>
       <div id="backendList" style="display:flex;flex-direction:column;gap:4px;flex:1;min-width:280px"></div>
     </div>
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="useIpv6"> 🌐 使用 IPv6 测试（需双端均支持 IPv6）</label>
+      <span class="muted" id="ipv6Hint" style="font-size:12px"></span>
+    </div>
     <div class="row"><button class="primary" data-action="startRun">🚀 开始测试</button></div>
     <p class="hint">
+      默认 IPv4：iperf3 与 ping 都使用目标机的 IPv4 地址，两端均为 IPv4（避免个别机器没有 IPv6 导致测试失败）。
+      勾选 IPv6 后改用目标机的 IPv6 地址，请先确认所选后端机器都具备 IPv6 连通性。<br>
       iperf3 全局串行（上/下行各 10 秒），ping 200 次并行；总时长 ≈ 1 分钟 + 台数×25 秒 + 3.5 分钟。
       目标机需放行 5201/TCP 与 ICMP（开始前自动预检）。
     </p>
@@ -196,7 +202,7 @@ summary{cursor:pointer;font-weight:600}
         <div class="field"><label>带宽标记（如 500M / 1G / 不限）</label><input id="mBandwidth" placeholder="500M"/></div>
       </div>
       <p class="hint" id="mRoleHint"></p>
-      <p class="hint">不保存任何 SSH 凭据；保存后复制接入命令到机器执行即可。</p>
+      <p class="hint">不保存任何 SSH 凭据；保存后复制接入命令到机器执行即可。接入后自动探测本机 IPv4 / IPv6 地址（用于选择测试协议），无需手动填写。</p>
       <div class="actions" style="justify-content:flex-end;margin-top:10px">
         <button data-action="closeModal">取消</button>
         <button class="primary" data-action="saveMachine">保存并生成接入命令</button>
@@ -304,16 +310,29 @@ function renderMachines() {
       <td><span class="dot ${m.online ? 'on' : 'off'}"></span>${m.online ? '在线' : '离线'}</td>
       <td><b>${esc(m.name)}</b></td>
       <td><span class="badge ${m.role}">${m.role === 'target' ? '目标' : '后端'}</span></td>
-      <td>${esc(m.agent_ip) || '<span class="muted">未接入</span>'}</td>
+      <td>${addrCell(m)}</td>
       <td>${esc(m.hostname) || '—'}</td>
       <td>${esc(m.region) || '<span class="muted">—</span>'}</td>
       <td>${esc(m.bandwidth) || '<span class="muted">—</span>'}</td>
       <td class="actions">
         <button class="small" data-action="showAgentCmd" data-id="${m.id}">接入命令</button>
+        <button class="small" data-action="discoverMachine" data-id="${m.id}" title="重新探测本机 IPv4 / IPv6 地址">探测地址</button>
         <button class="small" data-action="editMachine" data-id="${m.id}">编辑</button>
         <button class="small danger" data-action="deleteMachine" data-id="${m.id}">删除</button>
       </td>
     </tr>`).join('');
+}
+
+function addrCell(m) {
+  if (!m.ip4 && !m.ip6) {
+    return m.agent_ip
+      ? `<span class="muted">探测中…（接入 IP ${esc(m.agent_ip)}）</span>`
+      : '<span class="muted">未接入</span>';
+  }
+  const out = [];
+  if (m.ip4) out.push(`<span class="muted">v4</span> ${esc(m.ip4)}`);
+  if (m.ip6) out.push(`<span class="muted">v6</span> ${esc(m.ip6)}`);
+  return out.join('<br>');
 }
 
 function updateRoleHint() {
@@ -446,6 +465,18 @@ async function deleteMachine(id) {
   }
 }
 
+async function discoverMachine(id) {
+  const m = MACHINES.find(x => x.id === Number(id));
+  if (!m) return;
+  try {
+    await api(`/api/machines/${id}/discover`, {method: 'POST'});
+    toast(`已向「${m.name}」派发地址探测，几秒后自动刷新`);
+    setTimeout(() => loadMachines().catch(() => {}), 4000);
+  } catch (e) {
+    alert('探测失败: ' + e.message);
+  }
+}
+
 async function logout() {
   try { await api('/api/logout', {method: 'POST'}); } catch (e) {}
   location.href = '/login';
@@ -461,10 +492,13 @@ function renderRunForm() {
     ? new Set([...document.querySelectorAll('#backendList input:checked')].map(x => x.value))
     : null;
   $('targetSelect').innerHTML = targets.length
-    ? targets.map(m => `<option value="${m.id}">${esc(m.name)}（${esc(m.agent_ip) || '未接入'} · ${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}）</option>`).join('')
+    ? targets.map(m => {
+        const addr = m.ip4 ? `${esc(m.ip4)}${m.ip6 ? ' + IPv6' : ''}` : '地址未探测';
+        return `<option value="${m.id}">${esc(m.name)}（${addr} · ${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}）</option>`;
+      }).join('')
     : '<option value="">— 请先添加一台角色为「目标」的机器 —</option>';
   $('backendList').innerHTML = backends.length
-    ? backends.map(m => `<label class="chk"><input type="checkbox" value="${m.id}"> ${esc(m.name)} <span class="muted">(${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'})</span></label>`).join('')
+    ? backends.map(m => `<label class="chk"><input type="checkbox" value="${m.id}"> ${esc(m.name)} <span class="muted">(${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}${m.ip6 ? '' : ' · 无 IPv6'})</span></label>`).join('')
     : '<span class="muted">暂无后端机器</span>';
   if (runFormInit) {
     if ([...$('targetSelect').options].some(o => o.value === prevTarget)) $('targetSelect').value = prevTarget;
@@ -473,16 +507,50 @@ function renderRunForm() {
     document.querySelectorAll('#backendList input').forEach(cb => { cb.checked = true; });
   }
   runFormInit = true;
+  updateIpv6Ui();
+}
+
+function updateIpv6Ui() {
+  const cb = $('useIpv6');
+  const target = MACHINES.find(m => String(m.id) === $('targetSelect').value);
+  const hints = [];
+  if (!target || !target.ip6) {
+    // 目标机没有 IPv6：禁用选项并说明原因（不再静默失败）
+    cb.disabled = true;
+    cb.checked = false;
+    hints.push(target
+      ? '目标机未探测到 IPv6 地址，只能做 IPv4 测试（可点「探测地址」重试）'
+      : '请先选择目标机器');
+  } else {
+    cb.disabled = false;
+    // 目标机只有 IPv6（没有 IPv4）时自动选中，否则默认 IPv4 会直接报错
+    if (!target.ip4 && !cb.checked) {
+      cb.checked = true;
+      hints.push('该目标机只有 IPv6 地址，已自动选择 IPv6 测试');
+    }
+    hints.push(`目标机 IPv6：${target.ip6}`);
+    const checked = [...document.querySelectorAll('#backendList input:checked')].map(x => Number(x.value));
+    const no6 = MACHINES.filter(m => checked.includes(m.id) && !m.ip6).map(m => m.name);
+    if (no6.length) hints.push(`⚠️ 以下后端机器未探测到 IPv6，IPv6 测试可能失败：${no6.join('、')}`);
+  }
+  $('ipv6Hint').textContent = hints.join(' · ');
 }
 
 async function startRun() {
   const target_id = parseInt($('targetSelect').value, 10);
   const backend_ids = [...document.querySelectorAll('#backendList input:checked')].map(x => parseInt(x.value, 10));
+  const ip_version = $('useIpv6').disabled ? 4 : ($('useIpv6').checked ? 6 : 4);
   if (!target_id) return alert('请先添加一台角色为「目标」的机器并接入 Agent');
   if (!backend_ids.length) return alert('请至少勾选一台后端机器');
-  if (!confirm('将对目标机器逐台执行：iperf3 上/下行各 10 秒 + ping 200 次（每台约 4 分钟）。\n确认开始？')) return;
+  const proto = ip_version === 6 ? 'IPv6' : 'IPv4';
+  if (ip_version === 6 && !confirm(
+      '确认所选后端机器都支持 IPv6？\n\n' +
+      'IPv6 测试要求每台后端机器与目标机之间都有 IPv6 连通性，\n' +
+      '任一机器没有 IPv6 出口都会导致该台测试失败。\n\n' +
+      '继续开始 IPv6 测试？')) return;
+  if (!confirm(`将对目标机器逐台执行：iperf3 上/下行各 10 秒 + ping 200 次（每台约 4 分钟）。\n测试协议：${proto}\n确认开始？`)) return;
   try {
-    const r = await api('/api/runs', {method: 'POST', body: JSON.stringify({target_id, backend_ids})});
+    const r = await api('/api/runs', {method: 'POST', body: JSON.stringify({target_id, backend_ids, ip_version})});
     await loadRuns();
     openRun(r.run_id);
   } catch (e) {
@@ -503,7 +571,7 @@ async function loadRuns() {
   tb.innerHTML = runs.map(r => `
     <tr>
       <td>#${r.id}</td>
-      <td>${esc(r.target_name)} <span class="muted">(${esc(r.target_host)})</span></td>
+      <td>${esc(r.target_name)} <span class="muted">(${esc(r.target_host)} · ${(r.ip_version === 6) ? 'IPv6' : 'IPv4'})</span></td>
       <td>${r.done_count}/${r.backend_total} 完成${r.fail_count ? `，${r.fail_count} 失败` : ''}</td>
       <td><span class="badge ${r.status}">${statusText(r.status)}</span></td>
       <td class="muted">${r.created_at}</td>
@@ -543,7 +611,8 @@ async function pollRun() {
   const run = d.run;
   $('runDetailTitle').innerHTML = `测试 #${run.id} <span class="badge ${run.status}">${statusText(run.status)}</span>`;
   $('runDetailMeta').textContent =
-    `目标: ${run.target_name} (${run.target_host}) · 开始: ${run.created_at}` +
+    `目标: ${run.target_name} (${run.target_host}) · 协议: ${run.ip_version === 6 ? 'IPv6' : 'IPv4'}` +
+    ` · 开始: ${run.created_at}` +
     (run.finished_at ? ` · 结束: ${run.finished_at}` : '');
   const pre = $('logPre');
   const autoScroll = $('autoScroll') && $('autoScroll').checked;
@@ -728,6 +797,7 @@ const ACTIONS = {
   showAgentCmd: (d) => showAgentCmd(d.id),
   editMachine: (d) => editMachine(d.id),
   deleteMachine: (d) => deleteMachine(d.id),
+  discoverMachine: (d) => discoverMachine(d.id),
   regenToken,
   copyAgentCmd: () => copyText($('agentCmd').textContent, '已复制接入命令'),
   logout,
@@ -765,6 +835,16 @@ $('agentPanelUrl').addEventListener('input', () => {
 });
 
 $('mRole').addEventListener('change', updateRoleHint);
+
+$('targetSelect').addEventListener('change', updateIpv6Ui);
+$('backendList').addEventListener('change', updateIpv6Ui);
+$('useIpv6').addEventListener('change', () => {
+  // 勾选 IPv6 时给出一次显式确认，避免误选后整轮失败
+  const cb = $('useIpv6');
+  if (cb.checked && !confirm('IPv6 测试将使用目标机的 IPv6 地址：\n确认所有选中的后端机器都支持 IPv6？')) {
+    cb.checked = false;
+  }
+});
 
 /* ---------------- 初始化 ---------------- */
 

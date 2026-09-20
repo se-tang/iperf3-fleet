@@ -17,7 +17,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import db, quality, runner
 
-APP_VERSION = '2.6.0'
+APP_VERSION = '2.7.0'
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
@@ -296,6 +296,18 @@ def api_machine_delete(mid):
     return jsonify({'ok': True})
 
 
+@app.post('/api/machines/<int:mid>/discover')
+def api_machine_discover(mid):
+    """手动触发地址探测（异步，几秒后刷新机器列表即可看到结果）。"""
+    m = db.get_machine(mid)
+    if not m:
+        return jsonify({'error': '机器不存在'}), 404
+    if not db.machine_online(m):
+        return jsonify({'error': '该机器 Agent 未上线，无法探测地址'}), 400
+    runner.queue_discovery(mid, force=True)
+    return jsonify({'ok': True})
+
+
 # ---------------- Agent 脚本下发（公开，令牌在命令参数里） ----------------
 
 def _serve_agent_file(name):
@@ -373,7 +385,9 @@ def api_run_create():
     try:
         target_id = int(data.get('target_id'))
         backend_ids = [int(x) for x in (data.get('backend_ids') or [])]
-        run_id = runner.start_run(target_id, backend_ids)
+        # 默认 IPv4（两端都用 IPv4，避免机器缺 IPv6 时失败）；ip_version=6 才走 IPv6
+        ip_version = 6 if str(data.get('ip_version') or '4').strip() == '6' else 4
+        run_id = runner.start_run(target_id, backend_ids, ip_version)
     except (RuntimeError, ValueError, TypeError) as e:
         return jsonify({'error': str(e)}), 400
     return jsonify({'run_id': run_id})
@@ -443,6 +457,7 @@ def handle_value_error(e):
 
 if __name__ == '__main__':
     db.init_db()
+    runner.start_discovery_worker()
     from waitress import serve
     # clear_untrusted_proxy_headers=False：保留 X-Forwarded-For 交给 _client_ip()
     # 按规则采信（仅反代/内网来源），否则经 Caddy 接入的 Agent 真实 IP 会被剥离
