@@ -22,20 +22,44 @@ if [ "$(id -u)" != "0" ]; then
   exit 1
 fi
 
-ensure_pkg() { # $1=命令 $2=包名(apt) $3=包名(alpine)
+pkg_mgr() {
+  for _c in apt-get dnf yum zypper apk; do
+    command -v "$_c" >/dev/null 2>&1 && { printf '%s' "$_c"; return 0; }
+  done
+  printf ''
+}
+
+ensure_pkg() { # $1=命令 $2=包名(apt/dnf/yum/zypper) $3=包名(alpine) $4=可选的 rpm 包名覆盖
   command -v "$1" >/dev/null 2>&1 && return 0
   echo "[install] 正在安装 $2 ..."
-  apt-get install -y "$2" 2>/dev/null || yum install -y "$2" 2>/dev/null \
-    || dnf install -y "$2" 2>/dev/null || apk add --no-cache "$3" 2>/dev/null || return 1
+  _pm="$(pkg_mgr)"
+  case "$_pm" in
+    apt-get)
+      # 全新机器 apt 包列表可能是空的，必须先 update，否则 install 一定失败
+      DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$2" 2>/dev/null || true
+      ;;
+    dnf) dnf install -y "${4:-$2}" 2>/dev/null || true ;;
+    yum) yum install -y "${4:-$2}" 2>/dev/null || true ;;
+    zypper) zypper --non-interactive install "${4:-$2}" 2>/dev/null || true ;;
+    apk) apk add --no-cache "$3" 2>/dev/null || true ;;
+    *)
+      apt-get install -y "$2" 2>/dev/null || yum install -y "$2" 2>/dev/null \
+        || dnf install -y "$2" 2>/dev/null || apk add --no-cache "$3" 2>/dev/null || true
+      ;;
+  esac
   command -v "$1" >/dev/null 2>&1
 }
 
 if ! ensure_pkg curl curl curl; then
-  echo "❌ curl 安装失败，请手动安装 curl 后重试"
+  echo "❌ curl 安装失败，请手动安装后重试"
+  echo "   Debian/Ubuntu: apt-get update && apt-get install -y curl"
+  echo "   CentOS/RHEL/Rocky: yum install -y curl      Alpine: apk add curl"
   exit 1
 fi
 if ! ensure_pkg openssl openssl openssl; then
   echo "❌ openssl 安装失败（Agent 需要它校验任务签名）"
+  echo "   Debian/Ubuntu: apt-get install -y openssl   CentOS/RHEL: yum install -y openssl"
   exit 1
 fi
 

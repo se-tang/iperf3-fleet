@@ -4,6 +4,27 @@ Docker 化的 iperf3 多机线路质量测试面板。Agent 接入（面板不�
 
 ## 部署
 
+全新机器一条命令（脚本先自检运行环境，缺 `git` / `docker` 自动装好，再拉代码并启动面板）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/se-tang/iperf3-fleet/main/install.sh | bash
+```
+
+脚本做的事：
+
+1. 自检系统与包管理器（Debian/Ubuntu、CentOS/RHEL/Rocky/Alma/Fedora、Alpine、openSUSE、Arch）；
+2. 缺什么装什么：`curl`/`wget` + `ca-certificates` → `git` → **docker + docker compose v2**（官方安装脚本 → 发行版仓库 → compose 独立二进制，逐级兜底；守护进程没起也会自动拉起）；
+3. 克隆到 `~/iperf3-fleet` → 生成 `.env`（随机端口）→ `docker compose up -d --build` → 等健康检查通过后打印部署横幅（含初始登录密码）。
+
+- **可重复执行**：再次运行等于升级（`git pull` + 重新构建），数据、端口、机器接入关系全部保留；之前用过 HTTPS 会自动带上 `--profile tls`，不会把 caddy 弄丢。
+- **非 root 也能跑**：会通过 `sudo` 提权（需要机器上有 sudo）。
+- 国内装 Docker 慢/超时：`curl -fsSL https://raw.githubusercontent.com/se-tang/iperf3-fleet/main/install.sh | DOCKER_MIRROR=Aliyun bash`；机器走代理：命令前加 `https_proxy=http://IP:端口`。
+- 可用环境变量：`IPERF3_FLEET_DIR`（安装目录）、`IPERF3_FLEET_BRANCH`（分支）、`IPERF3_FLEET_TLS=1`（同时启用 HTTPS 网关）、`DOCKER_MIRROR`、`COMPOSE_MIRROR`。
+- 脚本需要 `bash`：用上面的 `| bash` 执行即可（Alpine 等默认 ash 的系统先 `apk add bash`）。
+- 机器上连 `curl` 都没有时（极少见），先 `apt-get update && apt-get install -y curl`（Debian/Ubuntu）或 `yum install -y curl`（CentOS/RHEL）或 `apk add curl`（Alpine）。
+
+想手动控制每一步：
+
 ```bash
 git clone https://github.com/se-tang/iperf3-fleet.git && cd iperf3-fleet && ([ -f .env ] || echo "PANEL_PORT=$(shuf -i 10000-30000 -n 1)" > .env) && docker compose up -d --build && sleep 5 && docker compose logs --tail 15 iperf3-fleet
 ```
@@ -46,7 +67,7 @@ docker compose --profile tls up -d
 
 ## 使用
 
-1. 登录面板 → 添加机器（名称/角色/地区/带宽）→ 复制接入命令到机器 root 执行 → 上线。
+1. 登录面板 → 添加机器（名称/角色/地区/带宽）→ 复制接入命令到机器 root 执行 → 上线（接入脚本会自动补齐 `curl`、`openssl`，全新机器可直接跑；`iperf3`/`ping` 由面板在开测前自动安装）。
 2. 选目标机、勾后端机 → 开始测试：iperf3 上/下行各 10 秒全局串行，ping 200 次并行，总时长 ≈ 1 分钟 + 台数×25 秒 + 3.5 分钟。
 3. 完成后复制/下载 Markdown 报告（丢包、RTT、抖动、上下行、重传、线路质量评价 + 每台原始数据）。删除机器会自动卸载其 Agent。
 
@@ -75,6 +96,12 @@ docker compose --profile tls up -d
 
 ```bash
 cd ~/iperf3-fleet && git pull && docker compose --profile tls up -d --build
+```
+
+或者直接重跑一键脚本（自动 `git pull` + 重新构建，并自动保留 tls profile）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/se-tang/iperf3-fleet/main/install.sh | bash
 ```
 
 数据、机器接入关系、端口全部保留，Agent 自动重连，登录密码不变。
