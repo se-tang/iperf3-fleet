@@ -361,7 +361,9 @@ function buildAgentCmd() {
   if (!agentMachine) return '';
   let url = $('agentPanelUrl').value.trim().replace(/\/+$/, '');
   if (url && !/^https?:\/\//.test(url)) url = 'http://' + url;
-  return `curl -fsSL ${url}/agent/install.sh | bash -s -- ${url} ${agentMachine.token} ${agentMachine.sign_key}`;
+  // 全新机器可能只装了 curl 或只装了 wget：两种下载器自适应，避免接入命令跑不起来
+  const fetchCmd = `command -v curl >/dev/null 2>&1 && curl -fsSL ${url}/agent/install.sh || wget -qO- ${url}/agent/install.sh`;
+  return `( ${fetchCmd} ) | bash -s -- ${url} ${agentMachine.token} ${agentMachine.sign_key}`;
 }
 
 function showAgentStep(m) {

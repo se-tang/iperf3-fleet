@@ -1,6 +1,7 @@
 #!/bin/bash
 # iperf3-fleet agent 一键安装脚本（由面板下发）
 # 用法: curl -fsSL http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌 签名密钥
+#       （机器上只有 wget 时：wget -qO- http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌 签名密钥）
 set -e
 
 PANEL_URL="${1:-}"
@@ -12,6 +13,7 @@ if [ -z "$PANEL_URL" ] || [ -z "$TOKEN" ] || [ -z "$SIGN_KEY" ]; then
     echo "   请回到面板 → 机器管理 → 「接入命令」，重新复制最新的接入命令后执行。"
   else
     echo "用法: curl -fsSL http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌 签名密钥"
+    echo "  （只有 wget 的机器：wget -qO- http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌 签名密钥）"
   fi
   exit 1
 fi
