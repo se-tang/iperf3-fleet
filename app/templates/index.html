@@ -60,6 +60,9 @@ summary{cursor:pointer;font-weight:600}
 .grid2 input,.grid2 select,.field input,.field select{width:100%}
 .field{margin-bottom:10px}
 .muted{color:var(--muted)}
+/* 后端机器备注里的 IPv6 标记：两种状态必须一眼可分（绿色=有，橙色=无） */
+.v6-yes{color:var(--green);font-weight:600}
+.v6-no{color:var(--orange)}
 .rating-s{color:var(--green);font-weight:600}
 .rating-a{color:var(--lime);font-weight:600}
 .rating-b{color:var(--orange);font-weight:600}
@@ -506,9 +509,10 @@ function renderRunForm() {
     : '<option value="">— 请先添加一台角色为「目标」的机器 —</option>';
   $('backendList').innerHTML = backends.length
     ? backends.map(m => {
-        // 备注里标出 IPv6 情况：有 V6 / 无 IPv6（地址列不重复展示）
-        const tags = [esc(m.region) || '未标记', esc(m.bandwidth) || '未标记', m.ip6 ? '有 V6' : '无 IPv6'];
-        return `<label class="chk"><input type="checkbox" value="${m.id}"> ${esc(m.name)} <span class="muted">(${tags.join(' · ')})</span></label>`;
+        // 备注里标出 IPv6 情况：有 V6 / 无 IPv6（地址列不重复展示；两种状态颜色区分开）
+        const meta = `${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}`;
+        const v6 = m.ip6 ? '<span class="v6-yes">有 V6</span>' : '<span class="v6-no">无 IPv6</span>';
+        return `<label class="chk"><input type="checkbox" value="${m.id}"> ${esc(m.name)} <span class="muted">(${meta} · ${v6})</span></label>`;
       }).join('')
     : '<span class="muted">暂无后端机器</span>';
   if (runFormInit) {
