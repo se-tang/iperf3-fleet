@@ -349,6 +349,74 @@ def test_probe_script():
     print('SCRIPT_REPORT_IPS 地址提取 OK（稳定/临时/ULA/无 ip 四种情况）')
 
 
+def test_job_ids():
+    """任务编号必须跨「面板数据库重置」继续递增。
+
+    Agent 端防重放是「编号比本地水位小就拒收」，而 AUTOINCREMENT 在面板重置后会
+    从 1 重新开始 —— 那会让整队 Agent 静默拒收所有任务（机器在线、却探测不到地址、
+    测试全部超时）。所以编号必须用时间戳打底。
+    """
+    import time as _time
+    from app import db
+    db.init_db()
+    m = db.create_machine({'name': 'jid', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    a = db.create_job(m['id'], 'echo a', 10)
+    b = db.create_job(m['id'], 'echo b', 10)
+    assert a > 10 ** 12, a                    # 时间戳打底，不再是 1、2、3
+    assert b > a, (a, b)
+    _time.sleep(0.005)                        # 模拟「面板数据库被重置」：清空任务表
+    db.get_db().execute('DELETE FROM jobs')
+    db.get_db().commit()
+    c = db.create_job(m['id'], 'echo c', 10)
+    assert c > b, (b, c)
+    print('任务编号跨重置递增 OK:', a, b, c)
+
+
+def test_probe_error_surfaced():
+    """探测结果与失败原因都要落到机器资料上，面板才能说明「为什么没有 IPv6」。"""
+    import threading
+    import time as _time
+    from app import db, runner
+    from app.app import app as flask_app
+    db.init_db()
+    c = flask_app.test_client()
+    m = db.create_machine({'name': 'probe', 'role': 'target', 'region': '', 'bandwidth': ''})
+    db.touch_machine(m['id'], 'probe', '93.184.216.34')
+
+    def probe_round(body):
+        res = {}
+        t = threading.Thread(
+            target=lambda: res.update(runner.discover_machine(m['id']) or {}), daemon=True)
+        t.start()
+        job = None
+        for _ in range(100):
+            job = db.get_db().execute(
+                "SELECT * FROM jobs WHERE machine_id=? AND status='queued' ORDER BY id DESC",
+                (m['id'],)).fetchone()
+            if job:
+                break
+            _time.sleep(0.05)
+        assert job, '面板未派发地址探测任务'
+        c.post('/api/agent/output',
+               headers={'X-Agent-Token': m['token']},
+               data={'job_id': job['id'], 'text': body, 'done': '1', 'exit_code': '0'})
+        t.join(timeout=10)
+        return db.get_machine(m['id'])
+
+    # 1) 探到全局地址：写入资料并清空失败原因
+    got = probe_round('IPV4=93.184.216.34\nIPV6=240e:3b0:1234:5678::9\n')
+    assert got['ip6'] == '240e:3b0:1234:5678::9', got
+    assert got['probe_error'] == '', got
+
+    # 2) 只有私网 / ULA：地址不写，但原因要留在机器上供面板显示
+    got = probe_round('IPV4=10.0.0.8\nIPV6=fd00::1\n')
+    assert '全局' in got['probe_error'], got
+
+    # 3) 任务没回传（Agent 拒收/离线）时，提示要能指路
+    assert 'agent.log' in runner._probe_fail_reason(TimeoutError('[x] 任务执行超时(20s): r4='))
+    print('地址探测失败原因回传 OK:', got['probe_error'][:30])
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
@@ -358,4 +426,6 @@ if __name__ == '__main__':
     test_test_protocol()
     test_discovery_flow()
     test_probe_script()
+    test_job_ids()
+    test_probe_error_surfaced()
     print('\nALL TESTS PASSED')

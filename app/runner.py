@@ -411,8 +411,22 @@ def queue_discovery(mid, force=False):
             found = discover_machine(mid, force=force)
             print(f'[探测] 机器 #{mid} 地址: {found or "未获取到全局地址"}', flush=True)
         except Exception as e:
-            print(f'[探测] 机器 #{mid} 失败: {e}', flush=True)
+            reason = _probe_fail_reason(e)
+            try:
+                db.set_machine_probe(mid, reason)
+            except Exception:
+                pass
+            print(f'[探测] 机器 #{mid} 失败: {reason}', flush=True)
     threading.Thread(target=run, daemon=True).start()
+
+
+def _probe_fail_reason(e):
+    """把探测失败转成面板上能看懂、能照着排查的一句话。"""
+    msg = str(e)
+    if '超时' in msg or '未领取' in msg:
+        return ('地址探测任务没有回传结果：Agent 可能没在跑任务或拒收了任务，'
+                '到机器上执行 tail -5 /var/lib/iperf3-fleet/agent.log 查看原因')
+    return msg[:200]
 
 
 def discover_machine(mid, force=False):
@@ -426,4 +440,7 @@ def discover_machine(mid, force=False):
     found = aj.parse_ip_report(out)
     if found:
         db.set_machine_ips(mid, found, force=force)
+        db.set_machine_probe(mid, '')
+    else:
+        db.set_machine_probe(mid, '这台机器没有全局可路由地址（只有私网 / ULA / 链路本地地址）')
     return found

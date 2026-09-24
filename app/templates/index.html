@@ -324,15 +324,19 @@ function renderMachines() {
 }
 
 function addrCell(m) {
+  // 探测失败时在地址旁标一个 ⚠️（鼠标悬停看原因），避免「机器在线却一直没有 IPv6」无从排查
+  const warn = m.probe_error
+    ? ` <span style="cursor:help" title="上次地址探测失败：${esc(m.probe_error)}">⚠️</span>`
+    : '';
   if (!m.ip4 && !m.ip6) {
-    return m.agent_ip
+    return (m.agent_ip
       ? `<span class="muted">探测中…（接入 IP ${esc(m.agent_ip)}）</span>`
-      : '<span class="muted">未接入</span>';
+      : '<span class="muted">未接入</span>') + warn;
   }
   // 双栈机器只显示 IPv4（IPv6 是否存在在后端机器备注里标出，不占地址列空间）；
   // 只有 IPv6 的机器才把 IPv6 当测试地址显示
-  if (m.ip4) return `<span class="muted">v4</span> ${esc(m.ip4)}`;
-  return `<span class="muted">v6</span> ${esc(m.ip6)}`;
+  if (m.ip4) return `<span class="muted">v4</span> ${esc(m.ip4)}${warn}`;
+  return `<span class="muted">v6</span> ${esc(m.ip6)}${warn}`;
 }
 
 function updateRoleHint() {

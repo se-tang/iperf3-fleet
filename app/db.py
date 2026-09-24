@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS machines (
     agent_ip TEXT NOT NULL DEFAULT '',
     ip4 TEXT NOT NULL DEFAULT '',
     ip6 TEXT NOT NULL DEFAULT '',
+    probe_error TEXT NOT NULL DEFAULT '',
+    probe_error_at TEXT,
     last_seen INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -126,6 +128,11 @@ def init_db():
         db.execute("ALTER TABLE machines ADD COLUMN ip4 TEXT NOT NULL DEFAULT ''")
     if cols_m and 'ip6' not in cols_m:
         db.execute("ALTER TABLE machines ADD COLUMN ip6 TEXT NOT NULL DEFAULT ''")
+    # 地址探测失败原因（面板侧可见，避免「机器在线却一直无 IPv6」无据可查）
+    if cols_m and 'probe_error' not in cols_m:
+        db.execute("ALTER TABLE machines ADD COLUMN probe_error TEXT NOT NULL DEFAULT ''")
+    if cols_m and 'probe_error_at' not in cols_m:
+        db.execute("ALTER TABLE machines ADD COLUMN probe_error_at TEXT")
     cols_r = [r['name'] for r in db.execute('PRAGMA table_info(runs)').fetchall()]
     if cols_r and 'ip_version' not in cols_r:
         db.execute('ALTER TABLE runs ADD COLUMN ip_version INTEGER NOT NULL DEFAULT 4')
@@ -371,6 +378,23 @@ def set_machine_ips(mid, values, force=False):
     return get_machine(mid)
 
 
+def set_machine_probe(mid, error=''):
+    """记录/清除最近一次地址探测的失败原因（成功时传空串清除）。
+
+    面板据此在机器列表上标出「为什么没有 IPv6」，不必再去翻容器日志或机器上的
+    agent.log（例如 Agent 因任务编号回退而拒收探测任务时，这里会写明原因）。
+    """
+    db = get_db()
+    if error:
+        db.execute("UPDATE machines SET probe_error=?, "
+                   "probe_error_at=datetime('now','localtime') WHERE id=?",
+                   (str(error)[:300], mid))
+    else:
+        db.execute("UPDATE machines SET probe_error='', probe_error_at=NULL WHERE id=?", (mid,))
+    db.commit()
+    return get_machine(mid)
+
+
 def delete_machine(mid, cmd_b64='', sig=''):
     """删除机器；曾上线过的留下令牌墓碑（内含已签名的卸载任务），
     Agent 下次心跳时自动执行卸载脚本。"""
@@ -514,13 +538,38 @@ def fail_open_items(rid, error):
 
 # ---------------- agent 任务队列 ----------------
 
+_job_id_lock = threading.Lock()
+
+
+def _alloc_job_id(db):
+    """分配全局严格递增的任务编号（毫秒时间戳打底，永不复用）。
+
+    Agent 端用 last_job_id 做防重放：比历史水位小的任务编号一律拒收。而
+    AUTOINCREMENT 在面板数据库被重置后（重新部署 / 删 data 目录）会从 1 重新
+    开始，此时每台 Agent 都会把新任务当成重放**静默拒绝**——机器显示在线，
+    但地址探测不出来、任务全部超时，且只有机器本地日志能看到原因。
+    用时间戳打底后，重置过的面板发号依然大于历史编号，旧 Agent 不重装即可自愈；
+    同一库内又始终取「已有最大值 + 1」，因此仍然严格递增。
+    """
+    row = db.execute('SELECT MAX(id) AS m FROM jobs').fetchone()
+    cur_max = int((row['m'] if row else 0) or 0)
+    return max(int(time.time() * 1000), cur_max + 1)
+
+
 def create_job(machine_id, cmd, timeout):
     db = get_db()
-    cur = db.execute(
-        'INSERT INTO jobs (machine_id, cmd, timeout) VALUES (?,?,?)',
-        (machine_id, cmd, int(timeout)))
-    db.commit()
-    return cur.lastrowid
+    with _job_id_lock:            # 编号分配 + 插入必须原子，否则并发会撞主键
+        for _ in range(20):
+            jid = _alloc_job_id(db)
+            try:
+                db.execute('INSERT INTO jobs (id, machine_id, cmd, timeout) VALUES (?,?,?,?)',
+                           (jid, machine_id, cmd, int(timeout)))
+                db.commit()
+                return jid
+            except sqlite3.IntegrityError:
+                db.rollback()
+                time.sleep(0.005)
+    raise RuntimeError('任务编号分配失败，请重试')
 
 
 def get_job(jid):

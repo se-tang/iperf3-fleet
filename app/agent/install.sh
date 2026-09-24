@@ -76,6 +76,17 @@ CONF=/etc/iperf3-fleet/agent.conf
 SPOOL=/var/lib/iperf3-fleet
 mkdir -p "$SPOOL" 2>/dev/null
 
+# 重新接入（令牌变了）后必须清掉任务编号水位线：面板侧该机器的记录已重建，
+# 签名密钥随之更换，历史任务的签名必然校验失败，清掉水位不会引入重放风险。
+# 不清的话，万一面板数据库被重置（任务编号重新从 1 开始），Agent 会把之后所有
+# 新任务都当成「重放」静默拒绝——表现就是机器在线，但地址探测不出来、任务全部超时。
+token_mark="$SPOOL/token_mark"
+if [ "$(cat "$token_mark" 2>/dev/null || echo '')" != "$TOKEN" ]; then
+  echo 0 > "$SPOOL/last_job_id"
+  printf '%s' "$TOKEN" > "$token_mark"
+  chmod 600 "$token_mark" 2>/dev/null
+fi
+
 heartbeat() {
   curl -fsS -m 20 -X POST "$PANEL_URL/api/agent/heartbeat" \
     -H "X-Agent-Token: $TOKEN" -H "X-Agent-Host: $(hostname)" 2>/dev/null
