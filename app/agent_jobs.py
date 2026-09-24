@@ -103,13 +103,20 @@ r4=""
 r6=""
 if command -v ip >/dev/null 2>&1; then
   r4=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9][0-9.]*\).*/\1/p' | head -n1)
-  # 只取稳定的全局地址：排除隐私扩展产生的临时地址与已弃用地址
-  r6=$(ip -6 addr show scope global 2>/dev/null \
-    | awk '/inet6/ && $0 !~ /temporary/ && $0 !~ /deprecated/ {print $2}' \
-    | cut -d/ -f1 | grep -v -iE '^f[cd]' | head -n1)
+  # 全局 IPv6：排除已弃用地址、ULA(fc/fd) 与链路本地(fe80)。
+  # 优先取稳定地址（开启隐私扩展的机器会额外生成 temporary 地址）；
+  # 若该机只有临时地址，退而使用临时地址——否则这类机器会完全探测不到 IPv6。
+  cands=$(ip -6 addr show scope global 2>/dev/null | awk '
+    /inet6/ && $0 !~ /deprecated/ {
+      a = $2; sub(/\/.*/, "", a);
+      if (a ~ /^(f[cd]|fe80)/) next;
+      print ($0 ~ /temporary/ ? "tmp" : "stable"), a;
+    }')
+  r6=$(printf '%s\n' "$cands" | awk '$1 == "stable" {print $2; exit}')
+  [ -z "$r6" ] && r6=$(printf '%s\n' "$cands" | awk 'NF {print $2; exit}')
 fi
 [ -z "$r4" ] && r4=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | head -n1)
-[ -z "$r6" ] && r6=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep ':' | grep -v -i '^fe80' | head -n1)
+[ -z "$r6" ] && r6=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep ':' | grep -v -iE '^(fe80|f[cd])' | head -n1)
 echo "IPV4=${r4}"
 echo "IPV6=${r6}"
 '''.strip()

@@ -329,10 +329,10 @@ function addrCell(m) {
       ? `<span class="muted">探测中…（接入 IP ${esc(m.agent_ip)}）</span>`
       : '<span class="muted">未接入</span>';
   }
-  const out = [];
-  if (m.ip4) out.push(`<span class="muted">v4</span> ${esc(m.ip4)}`);
-  if (m.ip6) out.push(`<span class="muted">v6</span> ${esc(m.ip6)}`);
-  return out.join('<br>');
+  // 双栈机器只显示 IPv4（IPv6 是否存在在后端机器备注里标出，不占地址列空间）；
+  // 只有 IPv6 的机器才把 IPv6 当测试地址显示
+  if (m.ip4) return `<span class="muted">v4</span> ${esc(m.ip4)}`;
+  return `<span class="muted">v6</span> ${esc(m.ip6)}`;
 }
 
 function updateRoleHint() {
@@ -495,12 +495,17 @@ function renderRunForm() {
     : null;
   $('targetSelect').innerHTML = targets.length
     ? targets.map(m => {
-        const addr = m.ip4 ? `${esc(m.ip4)}${m.ip6 ? ' + IPv6' : ''}` : '地址未探测';
+        // 测试地址同样只显示 IPv4（没有 IPv4 的机器才显示 IPv6）
+        const addr = m.ip4 ? esc(m.ip4) : (m.ip6 ? `${esc(m.ip6)}（仅 IPv6）` : '地址未探测');
         return `<option value="${m.id}">${esc(m.name)}（${addr} · ${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}）</option>`;
       }).join('')
     : '<option value="">— 请先添加一台角色为「目标」的机器 —</option>';
   $('backendList').innerHTML = backends.length
-    ? backends.map(m => `<label class="chk"><input type="checkbox" value="${m.id}"> ${esc(m.name)} <span class="muted">(${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}${m.ip6 ? '' : ' · 无 IPv6'})</span></label>`).join('')
+    ? backends.map(m => {
+        // 备注里标出 IPv6 情况：有 V6 / 无 IPv6（地址列不重复展示）
+        const tags = [esc(m.region) || '未标记', esc(m.bandwidth) || '未标记', m.ip6 ? '有 V6' : '无 IPv6'];
+        return `<label class="chk"><input type="checkbox" value="${m.id}"> ${esc(m.name)} <span class="muted">(${tags.join(' · ')})</span></label>`;
+      }).join('')
     : '<span class="muted">暂无后端机器</span>';
   if (runFormInit) {
     if ([...$('targetSelect').options].some(o => o.value === prevTarget)) $('targetSelect').value = prevTarget;

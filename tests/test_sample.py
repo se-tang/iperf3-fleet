@@ -258,6 +258,97 @@ def test_discovery_flow():
     print('地址探测端到端 OK:', result)
 
 
+def test_probe_script():
+    """SCRIPT_REPORT_IPS 的地址提取：稳定 v6 优先、只有临时地址也能取到、ULA/链路本地忽略。"""
+    if os.name != 'posix':
+        print('跳过 SCRIPT_REPORT_IPS 测试（仅 POSIX 环境执行）')
+        return
+    import shutil
+    import subprocess
+    from app import agent_jobs as aj
+
+    if not shutil.which('bash') or not shutil.which('awk'):
+        print('跳过 SCRIPT_REPORT_IPS 测试（缺 bash/awk）')
+        return
+
+    tmp = tempfile.mkdtemp(prefix='iperf3-fleet-probe-')
+    script = os.path.join(tmp, 'probe.sh')
+    with open(script, 'w', encoding='utf-8') as f:
+        f.write(aj.SCRIPT_REPORT_IPS + '\n')
+
+    # 假 ip / hostname：数据文件放在 stub 同目录，脚本内用 $(dirname "$0") 定位，
+    # 不把绝对路径写进 stub（Windows 反斜杠路径在 MSYS 下不可靠）
+    bins = {}
+    for name, with_ip in (('bin', True), ('bin_noip', False)):
+        d = os.path.join(tmp, name)
+        os.makedirs(d)
+        p = os.path.join(d, 'hostname')
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write('#!/bin/sh\n[ "$1" = "-I" ] && cat "$(dirname "$0")/hn.txt"\n')
+        os.chmod(p, 0o755)
+        if with_ip:
+            p = os.path.join(d, 'ip')
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write('#!/bin/sh\n'
+                        'd=$(dirname "$0")\n'
+                        'case "$*" in\n'
+                        '  "-4 route get 1.1.1.1") cat "$d/ip4.txt" ;;\n'
+                        '  *"addr show"*) cat "$d/ip6.txt" ;;\n'
+                        'esac\n')
+            os.chmod(p, 0o755)
+        bins[name] = d
+
+    V4 = '1.1.1.1 via 10.0.0.1 dev eth0 src 93.184.216.34 uid 0\n'
+    STABLE_TMP = ('2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n'
+                  '    inet6 2408:8207:1234:5678::1/64 scope global\n'
+                  '       valid_lft forever preferred_lft forever\n'
+                  '    inet6 2408:8207:1234:5678:abcd:ef01:2345:6789/64 scope global temporary dynamic\n')
+    TMP_ONLY = ('2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n'
+                '    inet6 240e:3b0:1234:5678:9abc:def0:1234:5678/64 scope global temporary dynamic\n')
+    ULA_LINK = ('2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n'
+                '    inet6 fd00::1/64 scope global\n'
+                '    inet6 fe80::216:3eff:fe12:3456/64 scope link\n')
+    HN_MIX = '10.0.0.8 240e:3b0:1234:5678:9abc:def0:1234:5678 fe80::1'
+
+    cases = [
+        ('稳定地址优先于临时地址', 'bin', V4, STABLE_TMP, '',
+         '93.184.216.34', '2408:8207:1234:5678::1'),
+        ('只有临时地址时退用临时地址', 'bin', V4, TMP_ONLY, '',
+         '93.184.216.34', '240e:3b0:1234:5678:9abc:def0:1234:5678'),
+        ('腾讯云 /128 scope global dynamic', 'bin', V4,
+         '2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n'
+         '    inet6 2402:4e00:1020:1404:0:9a3f:1b2c:3d4e/128 scope global dynamic\n',
+         '', '93.184.216.34', '2402:4e00:1020:1404:0:9a3f:1b2c:3d4e'),
+        ('ULA / 链路本地必须忽略', 'bin', V4, ULA_LINK, '', '93.184.216.34', ''),
+        ('无 ip 命令时回退 hostname -I', 'bin_noip', '', '', HN_MIX,
+         '10.0.0.8', '240e:3b0:1234:5678:9abc:def0:1234:5678'),
+    ]
+    for title, binname, v4_out, v6_out, hn_out, want4, want6 in cases:
+        for fn, text in (('ip4.txt', v4_out), ('ip6.txt', v6_out), ('hn.txt', hn_out)):
+            with open(os.path.join(bins[binname], fn), 'w', encoding='utf-8') as f:
+                f.write(text)
+        env = dict(os.environ)
+        env['PATH'] = bins[binname] + os.pathsep + os.environ.get('PATH', '')
+        if binname == 'bin_noip':
+            # 该用例依赖 stub 版的 hostname：个别环境（如 MSYS）PATH 会被重排导致
+            # 系统 hostname 抢先，这时跳过而不是误报失败
+            got_hn = subprocess.run(['bash', '-c', 'hostname -I'], capture_output=True,
+                                    text=True, env=env).stdout.strip()
+            if got_hn != hn_out.strip():
+                print('跳过「无 ip 命令」用例：本环境的 hostname 无法被 stub 覆盖')
+                continue
+        out = subprocess.run(['bash', script], capture_output=True, text=True, env=env).stdout
+        vals = dict(ln.split('=', 1) for ln in out.splitlines() if '=' in ln)
+        assert vals.get('IPV4') == want4, (title, out)
+        assert vals.get('IPV6') == want6, (title, out)
+
+    # 探测结果能被面板解析（临时地址同样有效）
+    got = aj.parse_ip_report('IPV4=93.184.216.34\nIPV6=240e:3b0:1234:5678:9abc:def0:1234:5678\n')
+    assert got == {'ip4': '93.184.216.34',
+                   'ip6': '240e:3b0:1234:5678:9abc:def0:1234:5678'}, got
+    print('SCRIPT_REPORT_IPS 地址提取 OK（稳定/临时/ULA/无 ip 四种情况）')
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
@@ -266,4 +357,5 @@ if __name__ == '__main__':
     test_xff_and_limiter()
     test_test_protocol()
     test_discovery_flow()
+    test_probe_script()
     print('\nALL TESTS PASSED')
