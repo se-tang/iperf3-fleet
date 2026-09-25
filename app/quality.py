@@ -292,15 +292,11 @@ def run_params_text(run):
     streams = int(run.get('streams') or 1)
     duration = int(run.get('duration') or 10)
     port = int(run.get('port') or 5201)
-    target_port = int(run.get('target_port') or 0) or port
     ping_count = int(run.get('ping_count') or 200)
     kind = ('UDP（-u，目标带宽 %s/流）' % (run.get('udp_bandwidth') or '100M')
             if int(run.get('udp') or 0) else 'TCP')
-    # 目标机在 NAT 后时，本机监听端口与后端连接端口可以不同
-    port_txt = (f'端口 {port}' if target_port == port
-                else f'端口：目标机监听 {target_port}，后端连接 {port}')
     return (f'iperf3 {streams} 线程（-P）× 上行 / 下行（-R）各 {duration} 秒（-t），'
-            f'{port_txt}，{kind}；`ping -c {ping_count} -i 1`；'
+            f'目标机端口 {port}（后端机默认连它），{kind}；`ping -c {ping_count} -i 1`；'
             f'iperf3 全局串行，ping 与其它机器的 iperf3 并行')
 
 

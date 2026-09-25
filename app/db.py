@@ -66,7 +66,6 @@ CREATE TABLE IF NOT EXISTS runs (
     streams INTEGER NOT NULL DEFAULT 1,
     duration INTEGER NOT NULL DEFAULT 10,
     port INTEGER NOT NULL DEFAULT 5201,
-    target_port INTEGER NOT NULL DEFAULT 0,
     udp INTEGER NOT NULL DEFAULT 0,
     udp_bandwidth TEXT NOT NULL DEFAULT '100M',
     ping_count INTEGER NOT NULL DEFAULT 200,
@@ -152,12 +151,14 @@ def init_db():
     for col, ddl in (('streams', 'INTEGER NOT NULL DEFAULT 1'),
                      ('duration', 'INTEGER NOT NULL DEFAULT 10'),
                      ('port', 'INTEGER NOT NULL DEFAULT 5201'),
-                     ('target_port', 'INTEGER NOT NULL DEFAULT 0'),
                      ('udp', 'INTEGER NOT NULL DEFAULT 0'),
                      ('udp_bandwidth', "TEXT NOT NULL DEFAULT '100M'"),
                      ('ping_count', 'INTEGER NOT NULL DEFAULT 200')):
         if cols_r and col not in cols_r:
             db.execute(f'ALTER TABLE runs ADD COLUMN {col} {ddl}')
+    # 注：曾短暂区分过「目标机监听端口 / 后端连接端口」（target_port 列），
+    # 但 NAT 商家的端口映射基本都是同号映射，最终只保留一个端口列（port），
+    # 旧库残留的 runs.target_port 列不再读取。
     for row in db.execute("SELECT id FROM machines WHERE sign_key=''").fetchall():
         db.execute('UPDATE machines SET sign_key=? WHERE id=?', (secrets.token_hex(32), row['id']))
     cols_tb = [r['name'] for r in db.execute('PRAGMA table_info(agent_tombstones)').fetchall()]
@@ -467,9 +468,9 @@ def _port_or_follow(v):
 def create_run(target, backend_ids, ip_version=4, target_host='', **params):
     """新建一次测试记录；params 为本次测试参数（线程/时长/端口/协议/ping 次数）。
 
-    - params['target_port']：目标机 iperf3 -s 实际监听的端口（0/缺省 = 跟随默认端口），
-      目标机在 NAT 后时用它可以和内网监听端口分开；
-    - params['ports']：{机器ID: 端口}，每台后端机连接目标机用的端口（缺省 = 默认端口）。
+    params['port'] 是**目标机端口**：目标机 iperf3 -s 监听它，后端机默认也连它
+    （NAT 商家的端口映射一般是同号映射，改这一个值即可）。
+    params['ports'] 可选，{机器ID: 端口}：个别后端机单独走不同连接端口的场景。
     """
     db = get_db()
     ip_version = 6 if int(ip_version or 4) == 6 else 4
@@ -477,14 +478,13 @@ def create_run(target, backend_ids, ip_version=4, target_host='', **params):
     ports = params.get('ports') or {}
     cur = db.execute(
         'INSERT INTO runs (target_id, target_name, target_host, target_region, target_bandwidth, '
-        'ip_version, streams, duration, port, target_port, udp, udp_bandwidth, ping_count) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        'ip_version, streams, duration, port, udp, udp_bandwidth, ping_count) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
         (target['id'], target['name'],
          target_host or (target['agent_ip'] or 'IP待agent上报'),
          target['region'], target['bandwidth'], ip_version,
          int(params.get('streams') or 1), int(params.get('duration') or 10),
-         default_port, _port_or_follow(params.get('target_port')),
-         1 if params.get('udp') else 0,
+         default_port, 1 if params.get('udp') else 0,
          str(params.get('udp_bandwidth') or '100M'), int(params.get('ping_count') or 200)))
     run_id = cur.lastrowid
     for bid in backend_ids:

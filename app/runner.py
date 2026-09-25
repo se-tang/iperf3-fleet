@@ -54,11 +54,7 @@ def normalize_params(data):
     bw = str(data.get('udp_bandwidth') or DEFAULT_PARAMS['udp_bandwidth']).strip().upper()
     if not _UDP_BW_RE.match(bw):
         raise RuntimeError('UDP 目标带宽必须带单位（示例：100M、1G、500K）')
-    # 目标机监听端口：留空/0 = 跟随默认端口（目标机在 NAT 后时可以单独指定内网监听端口）
-    tp_raw = data.get('target_port')
-    target_port = 0 if tp_raw is None or str(tp_raw).strip() in ('', '0') \
-        else _int_in(tp_raw, 1, 65535, '目标机监听端口')
-    # 每台后端机可以单独指定端口（{机器ID: 端口}），没指定的用默认端口
+    # 每台后端机可以单独指定连接端口（{机器ID: 端口}），没指定的跟目标机端口一致
     ports = {}
     raw_ports = data.get('ports')
     if isinstance(raw_ports, dict):
@@ -73,8 +69,7 @@ def normalize_params(data):
     return {
         'streams': num('streams', 1, 32, '线程数'),
         'duration': num('duration', 1, 300, '单向测试时长（秒）'),
-        'port': num('port', 1, 65535, 'iperf3 端口'),
-        'target_port': target_port,
+        'port': num('port', 1, 65535, '目标机端口'),
         'ping_count': num('ping_count', 1, 2000, 'ping 次数'),
         'udp': bool(data.get('udp')),
         'udp_bandwidth': bw,
@@ -89,7 +84,6 @@ def run_cfg(run):
         'streams': int(run.get('streams') or DEFAULT_PARAMS['streams']),
         'duration': int(run.get('duration') or DEFAULT_PARAMS['duration']),
         'port': aj.valid_port(run.get('port') or DEFAULT_PARAMS['port']),
-        'target_port': int(run.get('target_port') or 0),
         'ping_count': int(run.get('ping_count') or DEFAULT_PARAMS['ping_count']),
         'udp': bool(int(run.get('udp') or 0)),
         'udp_bandwidth': bw if _UDP_BW_RE.match(bw) else DEFAULT_PARAMS['udp_bandwidth'],
@@ -97,17 +91,21 @@ def run_cfg(run):
 
 
 def target_port_of(cfg):
-    """目标机 iperf3 -s 实际监听的端口（没单独指定时跟随默认端口）。"""
-    return aj.valid_port(cfg.get('target_port') or cfg['port'], cfg['port'])
+    """目标机 iperf3 -s 监听的端口 —— 即本次的目标机端口（后端机默认也连它）。
+
+    NAT 商家的端口映射基本都是同号映射（公网 43343 → 内网 43343），
+    所以只需要一个端口：目标机监听它，后端机也连它。
+    """
+    return aj.valid_port(cfg.get('port'), DEFAULT_PARAMS['port'])
 
 
 def item_port(it, cfg):
-    """该后端机本次连接目标机的端口（逐台存了就用存的；0/缺失 = 默认端口）。"""
-    return aj.valid_port((it or {}).get('port'), cfg['port'])
+    """该后端机本次连接目标机的端口（逐台存了就用存的；0/缺失 = 跟目标机端口一致）。"""
+    return aj.valid_port((it or {}).get('port'), target_port_of(cfg))
 
 
 def item_cfg(cfg, it):
-    """把默认参数换成该后端机的参数（端口逐台不同）。"""
+    """把参数换成该后端机的参数（端口逐台不同）。"""
     c = dict(cfg)
     c['port'] = item_port(it, cfg)
     return c
@@ -116,15 +114,14 @@ def item_cfg(cfg, it):
 def serve_ports(items, cfg):
     """目标机上需要监听的端口集合。
 
-    目标机监听端口必须起；此外每台后端机**单独指定过**的连接端口也一起起
-    （多机各用各端口的场景）。只有跟随默认端口的机器不再额外起 server——
-    目标机在 NAT 后、外网映射到别的端口时，本机不需要（也可能不能）监听外网端口。
+    目标机端口必须起；此外每台后端机**单独指定过**的连接端口也一起起
+    （多机各用各端口、目标机有公网 IP 的场景）。只跟随目标机端口的机器不额外起。
     """
     ports = {target_port_of(cfg)}
     for it in items:
         p = int((it or {}).get('port') or 0)
-        if p and p != cfg['port']:
-            ports.add(aj.valid_port(p, cfg['port']))
+        if p and p != target_port_of(cfg):
+            ports.add(aj.valid_port(p, target_port_of(cfg)))
     return sorted(ports)
 
 
@@ -324,25 +321,23 @@ def _worker(run_id, target, ip_version=4):
             raise RuntimeError('目标机 iperf3/ping 安装失败: ' + (out or '').strip()[-300:])
 
         items = db.get_run_items(run_id)
-        # 目标机监听端口（NAT 后可单独指定）+ 各后端机单独指定的连接端口
+        # 目标机端口（NAT 同号映射时就是商家映射的那个端口）+ 各机单独指定的连接端口
         tport = target_port_of(cfg)
         ports = serve_ports(items, cfg)
-        conn = sorted({item_port(it, cfg) for it in items}) or [cfg['port']]
         log(f"[目标] 启动 iperf3 server：监听端口 {'、'.join(str(p) for p in ports)}"
-            f"；后端机连接端口 {'、'.join(str(p) for p in conn)}"
-            + ('（目标机在 NAT 后，两者不同属正常）' if tport not in conn else ''))
+            f"（后端机默认连 {tport}）")
         for p in ports:
             required = (p == tport)
             code, out = _job(target, aj.script_start_server(p), 30, log, stop_check)
             if code != 0:
                 if required:
-                    raise RuntimeError(f'目标机 iperf3 -s 启动失败（监听端口 {p}）: '
+                    raise RuntimeError(f'目标机 iperf3 -s 启动失败（端口 {p}）: '
                                        + (out or '').strip()[-300:])
-                # 后端机单独指定的连接端口：NAT/端口转发场景下本机不必监听（也可能起不来）
-                log(f"[目标] ⚠️ 端口 {p} 未能在目标机本机监听（可能已被占用或本就走 NAT 映射）；"
-                    f"若该端口是直连目标机的，对应后端机会失败")
+                # 后端机单独指定的连接端口：起不来只影响那台机器（预检时会给出明确报错）
+                log(f"[目标] ⚠️ 端口 {p} 未能在目标机本机监听（可能已被占用）；"
+                    f"该端口对应的后端机会在预检时报错")
 
-        log(f"[目标] iperf3 -s 已就绪（监听 {tport}，{'UDP' if cfg['udp'] else 'TCP'}"
+        log(f"[目标] iperf3 -s 已就绪（端口 {tport}，{'UDP' if cfg['udp'] else 'TCP'}"
             f"{'，' + str(cfg['streams']) + ' 线程' if cfg['streams'] > 1 else ''}），"
             f"开始流水线测试：iperf3 串行 / ping 并行")
 
@@ -467,12 +462,9 @@ def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='I
                         hints += '；IPv6 测试需本机与目标机均具备 IPv6 连通性'
                     if cfg['udp']:
                         hints += f'；UDP 测试需同时放行 {my_port}/UDP'
-                    if my_port != target_port_of(cfg):
-                        hints += (f'；目标机本机监听的是 {target_port_of(cfg)}，'
-                                  f'{my_port} 需由 NAT / 端口转发映射进来')
                     raise RuntimeError(
                         f"目标机 {tq} 的 {my_port} 端口从本机不可达"
-                        f"（请检查目标机防火墙/安全组是否放行 {my_port}{hints}）")
+                        f"（请检查目标机防火墙/安全组/NAT 是否放行并映射到 {my_port}{hints}）")
 
             cmd_up = build_iperf_cmd(tq, my_cfg)
             db.update_item(iid, phase='上行测试')

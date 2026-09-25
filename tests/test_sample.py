@@ -424,15 +424,14 @@ def test_test_params():
 
     # 1) 默认值与历史行为一致（单线程 / 10 秒 / 5201 / ping 200 / TCP）
     cfg = runner.normalize_params({})
-    assert cfg == {'streams': 1, 'duration': 10, 'port': 5201, 'target_port': 0,
+    assert cfg == {'streams': 1, 'duration': 10, 'port': 5201,
                    'ping_count': 200, 'udp': False, 'udp_bandwidth': '100M', 'ports': {}}, cfg
 
     # 2) 自定义值（字符串数字、带宽大小写归一）
     cfg = runner.normalize_params({'streams': '4', 'duration': 30, 'port': '6500',
-                                   'target_port': '6500', 'ping_count': 50,
-                                   'udp': True, 'udp_bandwidth': '200m'})
-    assert cfg == {'streams': 4, 'duration': 30, 'port': 6500, 'target_port': 6500,
-                   'ping_count': 50, 'udp': True, 'udp_bandwidth': '200M', 'ports': {}}, cfg
+                                   'ping_count': 50, 'udp': True, 'udp_bandwidth': '200m'})
+    assert cfg == {'streams': 4, 'duration': 30, 'port': 6500, 'ping_count': 50,
+                   'udp': True, 'udp_bandwidth': '200M', 'ports': {}}, cfg
 
     # 3) 越界/非法值必须报错，而不是悄悄换成别的参数
     for bad in ({'streams': 0}, {'streams': 99}, {'duration': 0}, {'duration': 9999},
@@ -481,11 +480,10 @@ def test_test_params():
     # 7) 每台后端机可以单独指定端口：逐台落库 + 命令用各自的端口
     b2 = db.create_machine({'name': 'param-b2', 'role': 'backend', 'region': '', 'bandwidth': ''})
     run_id = db.create_run(t, [b['id'], b2['id']], 4, target_host='93.184.216.34',
-                           port=5201, target_port=5201, ports={b['id']: 6001},
+                           port=5201, ports={b['id']: 6001},
                            streams=2, duration=5, udp=False, udp_bandwidth='100M', ping_count=10)
     items = db.get_run_items(run_id)
-    assert [it['port'] for it in items] == [6001, 0], items      # 0 = 跟随默认端口
-    assert db.get_run(run_id)['target_port'] == 5201
+    assert [it['port'] for it in items] == [6001, 0], items      # 0 = 跟随目标机端口
     rcfg = runner.run_cfg(db.get_run(run_id))
     assert [runner.item_port(it, rcfg) for it in items] == [6001, 5201]
     assert runner.build_iperf_cmd('93.184.216.34', runner.item_cfg(rcfg, items[0])) == \
@@ -501,27 +499,29 @@ def test_test_params():
         except RuntimeError:
             pass
 
-    # 8) 目标机监听端口：NAT 后的目标机本机监听端口可与后端连接端口不同
-    assert runner.normalize_params({'target_port': ''})['target_port'] == 0     # 留空 = 跟随
-    try:
-        runner.normalize_params({'target_port': 70000})
-        raise AssertionError('越界的目标机监听端口应被拒绝')
-    except RuntimeError:
-        pass
-    nat = runner.normalize_params({'port': 30001, 'target_port': 5201})
-    assert nat['port'] == 30001 and nat['target_port'] == 5201
-    nat_cfg = dict(runner.DEFAULT_PARAMS, port=30001, target_port=5201)
+    # 8) 换端口（含 NAT 机：商家端口映射一般是同号映射，如公网 43343 → 内网 43343）
+    #    只改「目标机端口」，没单独改过的后端机必须跟着连新端口（曾经这里会连旧端口 5201）
+    cfg_nat = runner.normalize_params({'port': '43343'})
+    assert cfg_nat['port'] == 43343
     follow = [{'machine_name': 'A', 'port': 0}, {'machine_name': 'B', 'port': 0}]
-    assert runner.target_port_of(nat_cfg) == 5201
-    assert runner.serve_ports(follow, nat_cfg) == [5201]        # 只监听目标机本机端口
-    assert [runner.item_port(it, nat_cfg) for it in follow] == [30001, 30001]
-    # 多机各用各端口（无 NAT）：目标机监听端口 + 各机单独指定的连接端口都要起
-    cfg2 = dict(runner.DEFAULT_PARAMS, port=5201, target_port=0)
+    assert runner.target_port_of(cfg_nat) == 43343
+    assert runner.serve_ports(follow, cfg_nat) == [43343]
+    assert [runner.item_port(it, cfg_nat) for it in follow] == [43343, 43343]
+    assert runner.item_cfg(cfg_nat, follow[0])['port'] == 43343
+    assert runner.build_iperf_cmd('1.2.3.4', runner.item_cfg(cfg_nat, follow[0])) == \
+        'iperf3 -c 1.2.3.4 -p 43343 -t 10 -P 1'
+    # 多机各用各端口（目标机有公网 IP）：目标机端口 + 各机单独指定的连接端口都要起
+    cfg2 = runner.normalize_params({'port': '5201'})
     items2 = [{'machine_name': 'A', 'port': 6001}, {'machine_name': 'B', 'port': 0},
               {'machine_name': 'C', 'port': 6002}]
     assert runner.serve_ports(items2, cfg2) == [5201, 6001, 6002]
     assert [runner.item_port(it, cfg2) for it in items2] == [6001, 5201, 6002]
-    assert runner.target_port_of(dict(runner.DEFAULT_PARAMS, port=6500, target_port=0)) == 6500
+    # 越界端口仍要报错
+    try:
+        runner.normalize_params({'port': 70000})
+        raise AssertionError('越界端口应被拒绝')
+    except RuntimeError:
+        pass
     print('测试参数校验 / iperf3 命令拼装 OK:', runner.build_iperf_cmd('1.2.3.4', tcp))
 
 
@@ -593,7 +593,7 @@ def test_report_params_and_udp_columns():
            'port': 5201, 'udp': 1, 'udp_bandwidth': '200M', 'ping_count': 50}
     rep = quality.build_report(run, {'name': 'T', 'host': '1.2.3.4', 'region': '', 'bandwidth': ''}, items)
     assert ('- **测试参数**：iperf3 4 线程（-P）× 上行 / 下行（-R）各 30 秒（-t），'
-            '端口 5201，UDP（-u，目标带宽 200M/流）') in rep, rep
+            '目标机端口 5201（后端机默认连它），UDP（-u，目标带宽 200M/流）') in rep, rep
     assert 'UDP 丢包 上/下' in rep and 'UDP 抖动 上/下' in rep, rep
     assert '重传' not in rep.split('## 原始数据')[0], rep
     # 逐台端口：不同端口时列一行「各机连接端口」，原始数据小节也标出端口
@@ -606,22 +606,22 @@ def test_report_params_and_udp_columns():
     rep3 = quality.build_report(run, {'name': 'T', 'host': '1.2.3.4', 'region': '', 'bandwidth': ''}, one)
     assert '各机连接端口' not in rep3, rep3
 
-    # 目标机在 NAT 后：报告要写清「本机监听端口」与「后端连接端口」
-    nat_run = dict(run, port=30001, target_port=5201, udp=0, streams=1, duration=10,
+    # 换端口（NAT 同号映射）：报告里的目标机端口与后端连接端口都是新端口
+    nat_run = dict(run, port=43343, udp=0, streams=1, duration=10,
                    udp_bandwidth='100M', ping_count=200)
     rep4 = quality.build_report(nat_run, {'name': 'T', 'host': '1.2.3.4', 'region': '', 'bandwidth': ''},
                                 [dict(items[0], port=0)])
-    assert '端口：目标机监听 5201，后端连接 30001' in rep4, rep4
-    assert '### 后端机器1：HK-01（香港 · 500M · 5.6.*.* · 连接端口 30001）' in rep4, rep4
+    assert '目标机端口 43343（后端机默认连它），TCP' in rep4, rep4
+    assert '### 后端机器1：HK-01（香港 · 500M · 5.6.*.* · 连接端口 43343）' in rep4, rep4
 
     # 旧记录（没有参数列）退回默认参数，TCP 表头保留重传列
     old = {'created_at': 't0', 'finished_at': 't1', 'ip_version': 4, 'error': '',
            'target_name': 'T', 'target_host': '1.2.3.4'}
     rep2 = quality.build_report(old, {'name': 'T', 'host': '1.2.3.4', 'region': '', 'bandwidth': ''}, items)
     assert ('- **测试参数**：iperf3 1 线程（-P）× 上行 / 下行（-R）各 10 秒（-t），'
-            '端口 5201，TCP') in rep2, rep2
+            '目标机端口 5201（后端机默认连它），TCP') in rep2, rep2
     assert '| 重传 |' in rep2, rep2
-    print('报告参数行 / UDP 列 / 目标机端口 OK')
+    print('报告参数行 / UDP 列 / 换端口 OK')
 
 
 if __name__ == '__main__':
