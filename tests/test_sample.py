@@ -425,13 +425,13 @@ def test_test_params():
     # 1) 默认值与历史行为一致（单线程 / 10 秒 / 5201 / ping 200 / TCP）
     cfg = runner.normalize_params({})
     assert cfg == {'streams': 1, 'duration': 10, 'port': 5201, 'ping_count': 200,
-                   'udp': False, 'udp_bandwidth': '100M'}, cfg
+                   'udp': False, 'udp_bandwidth': '100M', 'ports': {}}, cfg
 
     # 2) 自定义值（字符串数字、带宽大小写归一）
     cfg = runner.normalize_params({'streams': '4', 'duration': 30, 'port': '6500',
                                    'ping_count': 50, 'udp': True, 'udp_bandwidth': '200m'})
     assert cfg == {'streams': 4, 'duration': 30, 'port': 6500, 'ping_count': 50,
-                   'udp': True, 'udp_bandwidth': '200M'}, cfg
+                   'udp': True, 'udp_bandwidth': '200M', 'ports': {}}, cfg
 
     # 3) 越界/非法值必须报错，而不是悄悄换成别的参数
     for bad in ({'streams': 0}, {'streams': 99}, {'duration': 0}, {'duration': 9999},
@@ -451,10 +451,15 @@ def test_test_params():
     udp_cmd = runner.build_iperf_cmd('2606:4700:4700::1111', dict(tcp, udp=True, udp_bandwidth='200M'))
     assert udp_cmd == 'iperf3 -c 2606:4700:4700::1111 -p 6500 -t 30 -P 4 -u -b 200M', udp_cmd
 
-    # 5) 端口等参数要真的落到 Agent 脚本里
-    assert '-p 6500' in aj.script_start_server(6500)
-    assert '5201' not in aj.script_start_server(6500)
+    # 5) 端口等参数要真的落到 Agent 脚本里；每台后端机可各用各的端口，
+    #    所以起 server 的脚本必须只清本端口，不能把别的端口的 server 一起杀了
+    srv = aj.script_start_server(6500)
+    assert 'PORT=6500' in srv and '/tmp/iperf3-server-$PORT.pid' in srv, srv
+    assert '5201' not in srv, srv
+    assert 'iperf3 -s -p $PORT' in srv, srv                 # 只清同端口残留
+    assert "pkill -f 'iperf3 -s'" not in srv, srv           # 不能无差别清杀
     assert 'port="6500"' in aj.script_check_port('1.2.3.4', 6500)
+    assert '/tmp/iperf3-server*.pid' in aj.SCRIPT_STOP_SERVER   # 收尾时全部停掉
     assert aj.valid_port(0) == 5201 and aj.valid_port(70000) == 5201
     assert aj.valid_port('abc') == 5201 and aj.valid_port('6500') == 6500
 
@@ -471,6 +476,28 @@ def test_test_params():
     r = c.post('/api/runs', json={'target_id': t['id'], 'backend_ids': [b['id']],
                                   'udp': True, 'udp_bandwidth': '100'})
     assert r.status_code == 400 and '带宽' in r.get_json()['error'], r.get_json()
+
+    # 7) 每台后端机可以单独指定端口：逐台落库 + 命令用各自的端口
+    b2 = db.create_machine({'name': 'param-b2', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    run_id = db.create_run(t, [b['id'], b2['id']], 4, target_host='93.184.216.34',
+                           port=5201, ports={b['id']: 6001}, streams=2, duration=5,
+                           udp=False, udp_bandwidth='100M', ping_count=10)
+    items = db.get_run_items(run_id)
+    assert [it['port'] for it in items] == [6001, 5201], items
+    rcfg = runner.run_cfg(db.get_run(run_id))
+    assert [runner.item_port(it, rcfg) for it in items] == [6001, 5201]
+    assert runner.build_iperf_cmd('93.184.216.34', runner.item_cfg(rcfg, items[0])) == \
+        'iperf3 -c 93.184.216.34 -p 6001 -t 5 -P 2'
+    assert runner.build_iperf_cmd('93.184.216.34', runner.item_cfg(rcfg, items[1])) == \
+        'iperf3 -c 93.184.216.34 -p 5201 -t 5 -P 2'
+    assert runner.normalize_params({'ports': {'3': '6001'}})['ports'] == {3: 6001}
+    for bad in ({'ports': {'1': 0}}, {'ports': {'1': 99999}}, {'ports': {'1': 'x'}},
+                {'ports': {'x': 5201}}):
+        try:
+            runner.normalize_params(bad)
+            raise AssertionError(f'{bad} 应该被拒绝')
+        except RuntimeError:
+            pass
     print('测试参数校验 / iperf3 命令拼装 OK:', runner.build_iperf_cmd('1.2.3.4', tcp))
 
 
@@ -532,16 +559,28 @@ def test_report_params_and_udp_columns():
     mt = quality.parse_metrics(PING_RAW, udp_up, udp_up)
     quality.evaluate(mt, {'bandwidth': ''})
     items = [{'machine_name': 'HK-01', 'machine_region': '香港', 'machine_bandwidth': '500M',
-              'machine_host': '5.6.7.8', 'status': 'done', 'error': '',
+              'machine_host': '5.6.7.8', 'status': 'done', 'error': '', 'port': 6001,
+              'metrics': _json.dumps(mt, ensure_ascii=False)},
+             {'machine_name': 'JP-02', 'machine_region': '东京', 'machine_bandwidth': '200M',
+              'machine_host': '9.9.9.9', 'status': 'done', 'error': '', 'port': 5201,
               'metrics': _json.dumps(mt, ensure_ascii=False)}]
     run = {'created_at': 't0', 'finished_at': 't1', 'ip_version': 4, 'error': '',
            'target_name': 'T', 'target_host': '1.2.3.4', 'streams': 4, 'duration': 30,
-           'port': 6500, 'udp': 1, 'udp_bandwidth': '200M', 'ping_count': 50}
+           'port': 5201, 'udp': 1, 'udp_bandwidth': '200M', 'ping_count': 50}
     rep = quality.build_report(run, {'name': 'T', 'host': '1.2.3.4', 'region': '', 'bandwidth': ''}, items)
     assert ('- **测试参数**：iperf3 4 线程（-P）× 上行 / 下行（-R）各 30 秒（-t），'
-            '端口 6500，UDP（-u，目标带宽 200M/流）') in rep, rep
+            '端口 5201，UDP（-u，目标带宽 200M/流）') in rep, rep
     assert 'UDP 丢包 上/下' in rep and 'UDP 抖动 上/下' in rep, rep
     assert '重传' not in rep.split('## 原始数据')[0], rep
+    # 逐台端口：不同端口时列一行「各机端口」，原始数据小节也标出端口
+    assert '- **各机端口**：HK-01 6001 · JP-02 5201' in rep, rep
+    assert '### 后端机器1：HK-01（香港 · 500M · 5.6.*.* · 端口 6001）' in rep, rep
+    assert '### 后端机器2：JP-02（东京 · 200M · 9.9.*.* · 端口 5201）' in rep, rep
+
+    # 只有一台机器、端口一致时不出现「各机端口」这一行
+    one = [dict(items[0], port=5201)]
+    rep3 = quality.build_report(run, {'name': 'T', 'host': '1.2.3.4', 'region': '', 'bandwidth': ''}, one)
+    assert '各机端口' not in rep3, rep3
 
     # 旧记录（没有参数列）退回默认参数，TCP 表头保留重传列
     old = {'created_at': 't0', 'finished_at': 't1', 'ip_version': 4, 'error': '',

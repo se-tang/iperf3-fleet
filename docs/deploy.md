@@ -1,10 +1,8 @@
 # 部署与 HTTPS
 
-## 一键部署
+> 一键部署命令见 [README「快速开始」](../README.md#快速开始)，这里只写它背后的细节。
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/se-tang/iperf3-fleet/main/install.sh | bash
-```
+## 部署脚本做了什么
 
 脚本先自检运行环境，缺什么自动装什么，再拉代码启动面板：
 

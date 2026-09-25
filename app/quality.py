@@ -313,6 +313,12 @@ def build_report(run, target, items):
         f"（{target.get('region') or '地区未标记'} · {target.get('bandwidth') or '带宽未标记'} · `{mask_ip(target.get('host'))}`）")
     lines.append(f"- **测试协议**：{proto}（后端发起端与目标被测端均使用 {proto}）")
     lines.append(f"- **测试参数**：{run_params_text(run)}")
+    default_port = int(run.get('port') or 5201)
+    port_pairs = [(it['machine_name'], int(it.get('port') or default_port)) for it in items]
+    if len({p for _, p in port_pairs}) > 1:
+        # 每台后端机可以用各自的端口连目标机（目标机按用到的端口分别起 server）
+        lines.append('- **各机端口**：'
+                     + ' · '.join(f'{name} {port}' for name, port in port_pairs))
     lines.append(f"- **测试时间**：{run['created_at']} ~ {run.get('finished_at') or ''}")
     lines.append('')
     if udp:
@@ -351,9 +357,11 @@ def build_report(run, target, items):
     lines.append('## 原始数据')
     for idx, it in enumerate(items, 1):
         lines.append('')
+        port = int(it.get('port') or run.get('port') or 5201)
         lines.append(
             f"### 后端机器{idx}：{it['machine_name']}"
-            f"（{it['machine_region'] or '未标记'} · {it['machine_bandwidth'] or '未标记'} · {mask_ip(it['machine_host'])}）")
+            f"（{it['machine_region'] or '未标记'} · {it['machine_bandwidth'] or '未标记'} · "
+            f"{mask_ip(it['machine_host'])} · 端口 {port}）")
         lines.append('')
         lines.append('```')
         if it['status'] == 'done' and it['metrics']:

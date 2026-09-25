@@ -55,36 +55,46 @@ else
 fi
 '''.strip()
 
-# 每轮测试开始：清掉旧进程后启动 iperf3 -s（也用于通道内掉线自愈重启）
-# 用 PID 文件管理进程，不硬依赖 pgrep/pkill（后者仅作为残留进程的补充清扫）
+# 每轮测试开始：清掉同端口的旧进程后启动 iperf3 -s（也用于通道内掉线自愈重启）
+# 每台后端机可以用各自的端口，所以 pid / 日志按端口分开，清扫也只清同端口，
+# 避免「起第二个端口的 server 时把第一个踢掉」。
 # timeout 1800：server 30 分钟自过期，防止面板崩溃/任务中断后残留进程被扫描器滥用
 # （过期后若有后续测试，通道内端口预检失败会自动重启 server）
 # 端口由用户自定义（默认 5201），模板里用 __PORT__ 占位后替换，避免 format 转义问题
 SCRIPT_START_SERVER_TMPL = r'''
-[ -f /tmp/iperf3-server.pid ] && kill "$(cat /tmp/iperf3-server.pid)" 2>/dev/null
-command -v pkill >/dev/null 2>&1 && pkill -f 'iperf3 -s' 2>/dev/null
+PORT=__PORT__
+PIDF="/tmp/iperf3-server-$PORT.pid"
+LOG="/tmp/iperf3-server-$PORT.log"
+[ -f "$PIDF" ] && kill "$(cat "$PIDF")" 2>/dev/null
+command -v pkill >/dev/null 2>&1 && pkill -f "iperf3 -s -p $PORT" 2>/dev/null
 sleep 0.5
-nohup timeout 1800 iperf3 -s -p __PORT__ > /tmp/iperf3-server.log 2>&1 &
-echo $! > /tmp/iperf3-server.pid
+nohup timeout 1800 iperf3 -s -p "$PORT" > "$LOG" 2>&1 &
+echo $! > "$PIDF"
 sleep 1
-if kill -0 "$(cat /tmp/iperf3-server.pid)" 2>/dev/null; then
-  echo SERVER_STARTED
+if kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+  echo "SERVER_STARTED port=$PORT"
 else
-  echo SERVER_FAILED
-  cat /tmp/iperf3-server.log 2>/dev/null
+  echo "SERVER_FAILED port=$PORT"
+  cat "$LOG" 2>/dev/null
   exit 1
 fi
 '''.strip()
 
 
 def script_start_server(port=5201):
-    """启动目标机的 iperf3 server（TCP/UDP 共用同一个 -s 进程，端口可自定义）。"""
+    """启动目标机指定端口上的 iperf3 server（TCP/UDP 共用同一个 -s 进程）。
+
+    多台后端机可以各用各的端口，因此这里只影响该端口对应的进程。
+    """
     return SCRIPT_START_SERVER_TMPL.replace('__PORT__', str(valid_port(port)))
 
 
 SCRIPT_STOP_SERVER = r'''
-[ -f /tmp/iperf3-server.pid ] && kill "$(cat /tmp/iperf3-server.pid)" 2>/dev/null
+for f in /tmp/iperf3-server*.pid; do
+  [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null
+done
 command -v pkill >/dev/null 2>&1 && pkill -f 'iperf3 -s' 2>/dev/null
+rm -f /tmp/iperf3-server*.pid
 echo IPERF3_SERVER_STOPPED
 '''.strip()
 

@@ -138,8 +138,9 @@ summary{cursor:pointer;font-weight:600}
         <input type="number" id="cfgStreams" value="1" min="1" max="32" step="1"></div>
       <div class="field" style="width:104px;margin-bottom:0"><label>单向时长 -t</label>
         <input type="number" id="cfgDuration" value="10" min="1" max="300" step="1"></div>
-      <div class="field" style="width:112px;margin-bottom:0"><label>iperf3 端口 -p</label>
-        <input type="number" id="cfgPort" value="5201" min="1" max="65535" step="1"></div>
+      <div class="field" style="width:118px;margin-bottom:0"><label>默认端口 -p</label>
+        <input type="number" id="cfgPort" value="5201" min="1" max="65535" step="1" data-prev="5201"
+               title="默认 iperf3 端口；每台后端机可在下面的列表里单独改"></div>
       <div class="field" style="width:110px;margin-bottom:0"><label>ping 次数 -c</label>
         <input type="number" id="cfgPing" value="200" min="1" max="2000" step="1"></div>
       <label class="chk" style="margin-bottom:6px"><input type="checkbox" id="cfgUdp"> 📦 UDP 测试 -u</label>
@@ -153,8 +154,10 @@ summary{cursor:pointer;font-weight:600}
       参数即 iperf3 原生命令：线程数 <code>-P</code>、单向时长 <code>-t</code>、端口 <code>-p</code>、
       UDP <code>-u</code> + 每流目标带宽 <code>-b</code>（<code>-b</code> 按流生效，×线程数 = 总目标带宽）；
       ping 次数 <code>-c</code>（每秒 1 次）。<br>
+      端口可**逐台指定**：上面的「默认端口」是全局默认，后端机器列表里每台还能单独改；
+      目标机会按用到的每个端口分别起 <code>iperf3 -s</code>。<br>
       iperf3 全局串行（上/下行各一次）、ping 并行，总时长 ≈ 1 分钟 + 台数 ×（2 × 时长 + 5 秒）。
-      目标机需放行所选端口（UDP 测试还需放行该端口的 UDP）与 ICMP，开始前会自动预检。
+      目标机需放行所用端口（UDP 测试还需放行该端口的 UDP）与 ICMP，开始前会自动预检。
     </p>
   </section>
 
@@ -188,7 +191,7 @@ summary{cursor:pointer;font-weight:600}
     <table>
       <thead><tr>
         <th>后端机器</th><th>地区</th><th>带宽</th><th>丢包率</th><th>RTT avg</th><th>抖动 mdev</th>
-        <th>上行 (sender)</th><th>下行 (receiver)</th><th>重传</th><th>线路质量评价</th>
+        <th>上行 (sender)</th><th>下行 (receiver)</th><th id="thRetr">重传</th><th>线路质量评价</th>
       </tr></thead>
       <tbody id="detailTableBody"></tbody>
     </table>
@@ -249,6 +252,7 @@ summary{cursor:pointer;font-weight:600}
 
 <script>
 let MACHINES = [];
+let RUN_PORTS = {};          // 机器ID -> 本次测试单独指定的 iperf3 端口（未改过的机器不在此表）
 let CURRENT_RUN = null;
 let pollTimer = null;
 let agentTimer = null;
@@ -509,7 +513,20 @@ async function logout() {
 
 /* ---------------- 发起测试 ---------------- */
 
+function runPort(m) {
+  // 该机器本次使用的端口：单独改过就用改的值，否则跟随上面的「默认端口」
+  const v = RUN_PORTS[m.id];
+  return (v === undefined || v === null || v === '') ? ($('cfgPort').value || '5201') : v;
+}
+
 function renderRunForm() {
+  // 正在「发起测试」区域里输入时不要重建 DOM：每 8 秒一次的机器列表刷新
+  // 会把节点换掉，导致光标丢失、输入被打断（值本身存在 RUN_PORTS 里不会丢）
+  const ae = document.activeElement;
+  if (ae && ae.classList && (ae.classList.contains('item-port')
+      || ['cfgStreams', 'cfgDuration', 'cfgPort', 'cfgPing', 'cfgUdpBw'].includes(ae.id))) {
+    return;
+  }
   const targets = MACHINES.filter(m => m.role === 'target');
   const backends = MACHINES.filter(m => m.role === 'backend');
   const prevTarget = $('targetSelect').value;
@@ -525,10 +542,18 @@ function renderRunForm() {
     : '<option value="">— 请先添加一台角色为「目标」的机器 —</option>';
   $('backendList').innerHTML = backends.length
     ? backends.map(m => {
-        // 备注里标出 IPv6 情况：有 V6 / 无 IPv6（地址列不重复展示；两种状态颜色区分开）
+        // 备注里标出 IPv6 情况（地址列不重复展示；两种状态颜色区分开）+ 该机本次用的端口
         const meta = `${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}`;
         const v6 = m.ip6 ? '<span class="v6-yes">有 V6</span>' : '<span class="v6-no">无 IPv6</span>';
-        return `<label class="chk"><input type="checkbox" value="${m.id}"> ${esc(m.name)} <span class="muted">(${meta} · ${v6})</span></label>`;
+        return `<div class="chk" style="gap:8px;flex-wrap:wrap">
+          <label class="chk" style="gap:6px"><input type="checkbox" value="${m.id}"> ${esc(m.name)}</label>
+          <span class="muted">(${meta} · ${v6})</span>
+          <label class="muted" style="display:flex;align-items:center;gap:4px;font-size:12px"
+                 title="该机器本次使用的 iperf3 端口（目标机会按用到的端口分别起 server）">端口
+            <input type="number" class="item-port" data-id="${m.id}" value="${esc(runPort(m))}"
+                   min="1" max="65535" step="1" style="width:76px;padding:2px 6px">
+          </label>
+        </div>`;
       }).join('')
     : '<span class="muted">暂无后端机器</span>';
   if (runFormInit) {
@@ -589,13 +614,27 @@ async function startRun() {
   if (udp && !/^\d{1,5}(\.\d{1,3})?[KMG]$/.test(udp_bandwidth)) {
     return alert('UDP 目标带宽必须带单位（示例：100M、1G、500K）');
   }
+  // 每台后端机的端口：没单独改过的用默认端口（不提交，后端按默认值落库）
+  const ports = {};
+  let perMachinePorts = false;
+  for (const id of backend_ids) {
+    const raw = RUN_PORTS[id];
+    if (raw === undefined || raw === null || raw === '') continue;
+    const p = parseInt(raw, 10);
+    if (!Number.isFinite(p) || p < 1 || p > 65535) {
+      return alert(`机器端口需在 1–65535 之间（收到 ${raw}）`);
+    }
+    if (p !== port) perMachinePorts = true;
+    ports[id] = p;
+  }
   const proto = ip_version === 6 ? 'IPv6' : 'IPv4';
   if (ip_version === 6 && !confirm(
       '确认所选后端机器都支持 IPv6？\n\n' +
       'IPv6 测试要求每台后端机器与目标机之间都有 IPv6 连通性，\n' +
       '任一机器没有 IPv6 出口都会导致该台测试失败。\n\n' +
       '继续开始 IPv6 测试？')) return;
-  const params = `${streams} 线程 · 上/下行各 ${duration} 秒 · 端口 ${port} · `
+  const params = `${streams} 线程 · 上/下行各 ${duration} 秒 · `
+    + `${perMachinePorts ? '端口逐台指定' : `端口 ${port}`} · `
     + `${udp ? `UDP（-b ${udp_bandwidth}/流，总目标约 ${streams}×）` : 'TCP'} · ping ${ping_count} 次`;
   const mins = Math.ceil((Math.max(backend_ids.length * (duration * 2 + 5), ping_count) + 30) / 60);
   if (!confirm(`将对所选后端机器逐台执行：\niperf3 ${params}\n测试协议：${proto}\n`
@@ -603,6 +642,7 @@ async function startRun() {
   try {
     const r = await api('/api/runs', {method: 'POST', body: JSON.stringify({
       target_id, backend_ids, ip_version, streams, duration, port, udp, udp_bandwidth, ping_count,
+      ports,
     })});
     await loadRuns();
     openRun(r.run_id);
@@ -625,7 +665,7 @@ async function loadRuns() {
     <tr>
       <td>#${r.id}</td>
       <td>${esc(r.target_name)} <span class="muted">(${esc(r.target_host)} · ${(r.ip_version === 6) ? 'IPv6' : 'IPv4'} `
-        + `· ${r.udp ? 'UDP' : 'TCP'} ${r.streams}线程/${r.duration}s/${r.port} · ping ${r.ping_count})</span></td>
+        + `· ${r.udp ? 'UDP' : 'TCP'} ${r.streams}线程/${r.duration}s/端口${r.port} · ping ${r.ping_count})</span></td>
       <td>${r.done_count}/${r.backend_total} 完成${r.fail_count ? `，${r.fail_count} 失败` : ''}</td>
       <td><span class="badge ${r.status}">${statusText(r.status)}</span></td>
       <td class="muted">${r.created_at}</td>
@@ -667,7 +707,9 @@ async function pollRun() {
   $('runDetailMeta').textContent =
     `目标: ${run.target_name} (${run.target_host}) · 协议: ${run.ip_version === 6 ? 'IPv6' : 'IPv4'}`
     + ` · ${run.udp ? `UDP -b ${run.udp_bandwidth}/流` : 'TCP'} ${run.streams} 线程`
-    + ` · 上/下行各 ${run.duration} 秒 · 端口 ${run.port} · ping ${run.ping_count} 次`
+    + ` · 上/下行各 ${run.duration} 秒 · 端口 ${run.port}`
+    + ((d.items || []).some(it => it.port && it.port !== run.port) ? '（部分机器单独指定，见下表）' : '')
+    + ` · ping ${run.ping_count} 次`
     + ` · 开始: ${run.created_at}`
     + (run.finished_at ? ` · 结束: ${run.finished_at}` : '');
   const pre = $('logPre');
@@ -688,12 +730,20 @@ async function pollRun() {
 }
 
 function renderRunDetail(d) {
+  const udp = !!d.run.udp;
+  // UDP 没有重传，那一列改成 UDP 丢包（上/下）
+  if ($('thRetr')) $('thRetr').textContent = udp ? 'UDP 丢包 上/下' : '重传';
   const rows = d.items.map((it, i) => {
     const region = esc(it.machine_region) || '—';
     const bw = esc(it.machine_bandwidth) || '—';
-    const name = `后端机器${i + 1}：${esc(it.machine_name)}`;
+    const port = it.port && d.run.port && it.port !== d.run.port
+      ? ` <span class="muted">:${it.port}</span>` : '';
+    const name = `后端机器${i + 1}：${esc(it.machine_name)}${port}`;
     if (it.status === 'done' && it.metrics_obj) {
       const mt = it.metrics_obj;
+      const last = udp
+        ? `${fmt(mt.up_udp_loss_pct, '%')} / ${fmt(mt.down_udp_loss_pct, '%')}`
+        : (mt.retr_total ?? '—');
       return `<tr>
         <td>${name}</td><td>${region}</td><td>${bw}</td>
         <td>${fmt(mt.loss_pct, '%')}</td>
@@ -701,7 +751,7 @@ function renderRunDetail(d) {
         <td>${mt.mdev_ms === null || mt.mdev_ms === undefined ? '—' : mt.mdev_ms + ' ms'}</td>
         <td>${fmt(mt.up_mbits, ' Mbit/s')}</td>
         <td>${fmt(mt.down_mbits, ' Mbit/s')}</td>
-        <td>${mt.retr_total ?? '—'}</td>
+        <td>${last}</td>
         <td><span class="rb ${ratingClass(mt.rating)}">${mt.rating}</span> <span class="muted">${esc(mt.rating_detail || '')}</span></td>
       </tr>`;
     }
@@ -907,6 +957,25 @@ $('cfgUdp').addEventListener('change', () => {
   const on = $('cfgUdp').checked;
   $('cfgUdpBw').disabled = !on;
   $('cfgUdpBw').style.opacity = on ? '1' : '.55';
+});
+
+$('backendList').addEventListener('input', e => {
+  // 记录每台机器单独改过的端口；列表每 8 秒会重绘，值存在 RUN_PORTS 里不会丢
+  const t = e.target;
+  if (t && t.classList && t.classList.contains('item-port')) RUN_PORTS[t.dataset.id] = t.value;
+});
+
+$('cfgPort').addEventListener('input', () => {
+  // 改「默认端口」时，把还没单独改过的机器一起带过去
+  const nv = $('cfgPort').value;
+  const ov = $('cfgPort').dataset.prev || '5201';
+  document.querySelectorAll('#backendList .item-port').forEach(inp => {
+    if (inp.value === ov) {
+      inp.value = nv;
+      delete RUN_PORTS[inp.dataset.id];
+    }
+  });
+  $('cfgPort').dataset.prev = nv;
 });
 
 /* ---------------- 初始化 ---------------- */
