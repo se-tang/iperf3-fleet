@@ -17,7 +17,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import db, quality, runner
 
-APP_VERSION = '2.8.0'
+APP_VERSION = '2.8.1'
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
@@ -68,12 +68,21 @@ def _is_cloudflare_ip(ip):
 def _client_ip():
     """Agent 真实来源 IP。XFF 由 Caddy 按部署模式写入，面板取 XFF 最后一项：
     - 方式 A（域名直连 Caddy，无 CF）：XFF = 对端 IP = 真实客户端；
-    - 方式 B（CF 橙云前置）：XFF = CF-Connecting-IP = Agent 真实 IP，因此
-      源站防火墙必须只放行 Cloudflare 回源网段，否则直连 Caddy 者可自带
-      该头伪造 agent_ip；
+    - 方式 B（CF 橙云前置）：Caddyfile.origin 用 header_up 把 XFF 覆盖为
+      CF-Connecting-IP = Agent 真实 IP，因此源站防火墙必须只放行 Cloudflare
+      回源网段，否则直连 Caddy 者可自带该头伪造 agent_ip；
     - 面板直挂 CF（无 Caddy）：remote 属于 CF 网段时优先采信 CF-Connecting-IP；
+    - **Caddyfile.acme + CF 橙云**（配置混用）：Caddy 写进 XFF 的是「对端」=
+      Cloudflare 边缘 IP，会每几秒换一个，必须改回 CF-Connecting-IP，
+      否则机器地址会被记成会变的 CDN 地址（表现为地址乱跳、测试报端口不可达）；
     - 公网直连（无反代）：一律用 remote_addr，防止伪造头伪造 agent_ip / 绕过限速。"""
     ra = request.remote_addr or ''
+    cf_header = request.headers.get('CF-Connecting-IP', '').strip()
+    if cf_header:
+        try:
+            ipaddress.ip_address(cf_header)
+        except ValueError:
+            cf_header = ''
     ip = ra
     try:
         ra_ip = ipaddress.ip_address(ra)
@@ -81,14 +90,9 @@ def _client_ip():
     except ValueError:
         behind_proxy = False
     if behind_proxy:
-        if _is_cloudflare_ip(ra):
-            cfip = request.headers.get('CF-Connecting-IP', '').strip()
-            if cfip:
-                try:
-                    ipaddress.ip_address(cfip)
-                    return cfip[:64]
-                except ValueError:
-                    pass
+        if _is_cloudflare_ip(ra) and cf_header:
+            # 面板（或反代）直挂 CF：remote 就是 CF 边缘，CF-Connecting-IP 最可信
+            return cf_header[:64]
         xff = request.headers.get('X-Forwarded-For', '')
         if xff:
             last = xff.split(',')[-1].strip()
@@ -97,6 +101,9 @@ def _client_ip():
                 ip = last
             except ValueError:
                 pass
+        # 取到的是 Cloudflare 边缘地址 → 说明这一跳是 CF 回源，改用 CF 写入的真实客户端 IP
+        if cf_header and _is_cloudflare_ip(ip) and not _is_cloudflare_ip(cf_header):
+            ip = cf_header
     try:
         ipaddress.ip_address(ip)
     except ValueError:
@@ -254,8 +261,16 @@ def _machine_fields(data):
     role = clean('role', 16, 'backend')
     if role not in ('backend', 'target'):
         raise ValueError('角色无效')
+    # 手动测试地址：留空 = 自动（心跳观测 / 本机探测）；填了就按它测
+    addr = clean('addr_override', 64)
+    if addr:
+        try:
+            ipaddress.ip_address(addr)
+        except ValueError:
+            raise ValueError('手动测试地址不是合法 IP（留空则自动探测）')
     return {'name': name, 'role': role,
-            'region': clean('region', 32), 'bandwidth': clean('bandwidth', 32)}
+            'region': clean('region', 32), 'bandwidth': clean('bandwidth', 32),
+            'addr_override': addr}
 
 
 @app.post('/api/machines')

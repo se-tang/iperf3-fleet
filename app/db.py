@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS machines (
     agent_ip TEXT NOT NULL DEFAULT '',
     ip4 TEXT NOT NULL DEFAULT '',
     ip6 TEXT NOT NULL DEFAULT '',
+    addr_override TEXT NOT NULL DEFAULT '',
     probe_error TEXT NOT NULL DEFAULT '',
     probe_error_at TEXT,
     last_seen INTEGER,
@@ -144,6 +145,9 @@ def init_db():
         db.execute("ALTER TABLE machines ADD COLUMN probe_error TEXT NOT NULL DEFAULT ''")
     if cols_m and 'probe_error_at' not in cols_m:
         db.execute("ALTER TABLE machines ADD COLUMN probe_error_at TEXT")
+    # 手动指定测试地址（NAT / 反代后面板观测到的地址不对时兜底；留空 = 自动）
+    if cols_m and 'addr_override' not in cols_m:
+        db.execute("ALTER TABLE machines ADD COLUMN addr_override TEXT NOT NULL DEFAULT ''")
     cols_r = [r['name'] for r in db.execute('PRAGMA table_info(runs)').fetchall()]
     if cols_r and 'ip_version' not in cols_r:
         db.execute('ALTER TABLE runs ADD COLUMN ip_version INTEGER NOT NULL DEFAULT 4')
@@ -319,8 +323,10 @@ def get_machine_by_token(token):
 def create_machine(f):
     db = get_db()
     cur = db.execute(
-        'INSERT INTO machines (name, role, region, bandwidth, token, sign_key) VALUES (?,?,?,?,?,?)',
+        'INSERT INTO machines (name, role, region, bandwidth, addr_override, token, sign_key) '
+        'VALUES (?,?,?,?,?,?,?)',
         (f['name'], f['role'], f['region'], f['bandwidth'],
+         (f.get('addr_override') or '').strip(),
          secrets.token_hex(16), secrets.token_hex(32)))
     db.commit()
     return get_machine(cur.lastrowid)
@@ -328,8 +334,10 @@ def create_machine(f):
 
 def update_machine(mid, f):
     db = get_db()
-    db.execute('UPDATE machines SET name=?, role=?, region=?, bandwidth=? WHERE id=?',
-               (f['name'], f['role'], f['region'], f['bandwidth'], mid))
+    db.execute('UPDATE machines SET name=?, role=?, region=?, bandwidth=?, addr_override=? '
+               'WHERE id=?',
+               (f['name'], f['role'], f['region'], f['bandwidth'],
+                (f.get('addr_override') or '').strip(), mid))
     db.commit()
     return get_machine(mid)
 
@@ -351,8 +359,16 @@ def ip_family(ip):
 
 
 def machine_test_ip(m, ip_version=4):
-    """取该机器用于测试的地址（默认 IPv4）。"""
-    return (m.get('ip6') if int(ip_version or 4) == 6 else m.get('ip4')) or ''
+    """取该机器用于测试的地址（默认 IPv4）。
+
+    手动指定的测试地址优先——NAT / 反代后面板观测到的地址可能不对（例如前置 CDN
+    把入口 IP 当成了机器 IP），这时在机器资料里填死真实地址即可。
+    """
+    want = 6 if int(ip_version or 4) == 6 else 4
+    override = (m.get('addr_override') or '').strip()
+    if override and ip_family(override) == want:
+        return override
+    return (m.get('ip6') if want == 6 else m.get('ip4')) or ''
 
 
 def touch_machine(mid, hostname, ip):
