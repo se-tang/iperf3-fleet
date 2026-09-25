@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS runs (
     streams INTEGER NOT NULL DEFAULT 1,
     duration INTEGER NOT NULL DEFAULT 10,
     port INTEGER NOT NULL DEFAULT 5201,
+    target_port INTEGER NOT NULL DEFAULT 0,
     udp INTEGER NOT NULL DEFAULT 0,
     udp_bandwidth TEXT NOT NULL DEFAULT '100M',
     ping_count INTEGER NOT NULL DEFAULT 200,
@@ -84,7 +85,7 @@ CREATE TABLE IF NOT EXISTS run_items (
     machine_host TEXT NOT NULL DEFAULT '',
     machine_region TEXT NOT NULL DEFAULT '',
     machine_bandwidth TEXT NOT NULL DEFAULT '',
-    port INTEGER NOT NULL DEFAULT 5201,
+    port INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     phase TEXT NOT NULL DEFAULT '',
     ping_raw TEXT NOT NULL DEFAULT '',
@@ -127,9 +128,10 @@ def init_db():
     cols_items = [r['name'] for r in db.execute('PRAGMA table_info(run_items)').fetchall()]
     if cols_items and 'phase' not in cols_items:
         db.execute("ALTER TABLE run_items ADD COLUMN phase TEXT NOT NULL DEFAULT ''")
-    # v2.8：每台后端机可以用各自的 iperf3 端口（目标机按用到的端口分别起 server）
+    # 每台后端机可以用各自的 iperf3 端口（0 = 跟随本次测试的默认端口）
     if cols_items and 'port' not in cols_items:
-        db.execute('ALTER TABLE run_items ADD COLUMN port INTEGER NOT NULL DEFAULT 5201')
+        db.execute('ALTER TABLE run_items ADD COLUMN port INTEGER NOT NULL DEFAULT 0')
+    # 目标机在 NAT 后时，其本地监听端口可以与后端机连接端口不同（0 = 跟随默认端口）
     cols_m = [r['name'] for r in db.execute('PRAGMA table_info(machines)').fetchall()]
     if cols_m and 'sign_key' not in cols_m:
         db.execute("ALTER TABLE machines ADD COLUMN sign_key TEXT NOT NULL DEFAULT ''")
@@ -150,6 +152,7 @@ def init_db():
     for col, ddl in (('streams', 'INTEGER NOT NULL DEFAULT 1'),
                      ('duration', 'INTEGER NOT NULL DEFAULT 10'),
                      ('port', 'INTEGER NOT NULL DEFAULT 5201'),
+                     ('target_port', 'INTEGER NOT NULL DEFAULT 0'),
                      ('udp', 'INTEGER NOT NULL DEFAULT 0'),
                      ('udp_bandwidth', "TEXT NOT NULL DEFAULT '100M'"),
                      ('ping_count', 'INTEGER NOT NULL DEFAULT 200')):
@@ -452,10 +455,21 @@ def _valid_port(v, default=5201):
     return p if 1 <= p <= 65535 else default
 
 
+def _port_or_follow(v):
+    """0/空/非法 = 跟随本次测试的默认端口（真实校验在 runner.normalize_params）。"""
+    try:
+        p = int(str(v).strip())
+    except (TypeError, ValueError):
+        return 0
+    return p if 1 <= p <= 65535 else 0
+
+
 def create_run(target, backend_ids, ip_version=4, target_host='', **params):
     """新建一次测试记录；params 为本次测试参数（线程/时长/端口/协议/ping 次数）。
 
-    params['ports'] 可选，形如 {机器ID: 端口}：每台后端机可以用各自的端口连目标机。
+    - params['target_port']：目标机 iperf3 -s 实际监听的端口（0/缺省 = 跟随默认端口），
+      目标机在 NAT 后时用它可以和内网监听端口分开；
+    - params['ports']：{机器ID: 端口}，每台后端机连接目标机用的端口（缺省 = 默认端口）。
     """
     db = get_db()
     ip_version = 6 if int(ip_version or 4) == 6 else 4
@@ -463,13 +477,14 @@ def create_run(target, backend_ids, ip_version=4, target_host='', **params):
     ports = params.get('ports') or {}
     cur = db.execute(
         'INSERT INTO runs (target_id, target_name, target_host, target_region, target_bandwidth, '
-        'ip_version, streams, duration, port, udp, udp_bandwidth, ping_count) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        'ip_version, streams, duration, port, target_port, udp, udp_bandwidth, ping_count) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (target['id'], target['name'],
          target_host or (target['agent_ip'] or 'IP待agent上报'),
          target['region'], target['bandwidth'], ip_version,
          int(params.get('streams') or 1), int(params.get('duration') or 10),
-         default_port, 1 if params.get('udp') else 0,
+         default_port, _port_or_follow(params.get('target_port')),
+         1 if params.get('udp') else 0,
          str(params.get('udp_bandwidth') or '100M'), int(params.get('ping_count') or 200)))
     run_id = cur.lastrowid
     for bid in backend_ids:
@@ -479,7 +494,7 @@ def create_run(target, backend_ids, ip_version=4, target_host='', **params):
             'machine_region, machine_bandwidth, port) VALUES (?,?,?,?,?,?,?)',
             (run_id, m['id'], m['name'], m['agent_ip'] or 'IP待agent上报',
              m['region'], m['bandwidth'],
-             _valid_port(ports.get(bid, ports.get(str(bid))), default_port)))
+             _port_or_follow(ports.get(bid, ports.get(str(bid))))))
     db.commit()
     return run_id
 

@@ -292,11 +292,15 @@ def run_params_text(run):
     streams = int(run.get('streams') or 1)
     duration = int(run.get('duration') or 10)
     port = int(run.get('port') or 5201)
+    target_port = int(run.get('target_port') or 0) or port
     ping_count = int(run.get('ping_count') or 200)
     kind = ('UDP（-u，目标带宽 %s/流）' % (run.get('udp_bandwidth') or '100M')
             if int(run.get('udp') or 0) else 'TCP')
+    # 目标机在 NAT 后时，本机监听端口与后端连接端口可以不同
+    port_txt = (f'端口 {port}' if target_port == port
+                else f'端口：目标机监听 {target_port}，后端连接 {port}')
     return (f'iperf3 {streams} 线程（-P）× 上行 / 下行（-R）各 {duration} 秒（-t），'
-            f'端口 {port}，{kind}；`ping -c {ping_count} -i 1`；'
+            f'{port_txt}，{kind}；`ping -c {ping_count} -i 1`；'
             f'iperf3 全局串行，ping 与其它机器的 iperf3 并行')
 
 
@@ -316,8 +320,8 @@ def build_report(run, target, items):
     default_port = int(run.get('port') or 5201)
     port_pairs = [(it['machine_name'], int(it.get('port') or default_port)) for it in items]
     if len({p for _, p in port_pairs}) > 1:
-        # 每台后端机可以用各自的端口连目标机（目标机按用到的端口分别起 server）
-        lines.append('- **各机端口**：'
+        # 每台后端机可以用各自的端口连目标机（目标机会按用到的端口分别起 server）
+        lines.append('- **各机连接端口**：'
                      + ' · '.join(f'{name} {port}' for name, port in port_pairs))
     lines.append(f"- **测试时间**：{run['created_at']} ~ {run.get('finished_at') or ''}")
     lines.append('')
@@ -361,7 +365,7 @@ def build_report(run, target, items):
         lines.append(
             f"### 后端机器{idx}：{it['machine_name']}"
             f"（{it['machine_region'] or '未标记'} · {it['machine_bandwidth'] or '未标记'} · "
-            f"{mask_ip(it['machine_host'])} · 端口 {port}）")
+            f"{mask_ip(it['machine_host'])} · 连接端口 {port}）")
         lines.append('')
         lines.append('```')
         if it['status'] == 'done' and it['metrics']:

@@ -141,6 +141,9 @@ summary{cursor:pointer;font-weight:600}
       <div class="field" style="width:118px;margin-bottom:0"><label>默认端口 -p</label>
         <input type="number" id="cfgPort" value="5201" min="1" max="65535" step="1" data-prev="5201"
                title="默认 iperf3 端口；每台后端机可在下面的列表里单独改"></div>
+      <div class="field" style="width:132px;margin-bottom:0"><label>目标机监听端口</label>
+        <input type="number" id="cfgTargetPort" min="1" max="65535" step="1" placeholder="跟随默认"
+               title="目标机 iperf3 -s 实际监听的端口；目标机在 NAT 后、外网映射端口不同时填这里（留空=用默认端口）"></div>
       <div class="field" style="width:110px;margin-bottom:0"><label>ping 次数 -c</label>
         <input type="number" id="cfgPing" value="200" min="1" max="2000" step="1"></div>
       <label class="chk" style="margin-bottom:6px"><input type="checkbox" id="cfgUdp"> 📦 UDP 测试 -u</label>
@@ -154,8 +157,9 @@ summary{cursor:pointer;font-weight:600}
       参数即 iperf3 原生命令：线程数 <code>-P</code>、单向时长 <code>-t</code>、端口 <code>-p</code>、
       UDP <code>-u</code> + 每流目标带宽 <code>-b</code>（<code>-b</code> 按流生效，×线程数 = 总目标带宽）；
       ping 次数 <code>-c</code>（每秒 1 次）。<br>
-      端口可**逐台指定**：上面的「默认端口」是全局默认，后端机器列表里每台还能单独改；
-      目标机会按用到的每个端口分别起 <code>iperf3 -s</code>。<br>
+      端口可**逐台指定**：上面的「默认端口」是全局默认，后端机器列表里每台还能单独改**连接端口**；
+      目标机在 NAT 后时，在「目标机监听端口」填它本机实际监听的端口（留空 = 同默认端口），
+      目标机会按 <code>目标机监听端口</code> 以及各机单独指定的连接端口分别起 <code>iperf3 -s</code>。<br>
       iperf3 全局串行（上/下行各一次）、ping 并行，总时长 ≈ 1 分钟 + 台数 ×（2 × 时长 + 5 秒）。
       目标机需放行所用端口（UDP 测试还需放行该端口的 UDP）与 ICMP，开始前会自动预检。
     </p>
@@ -524,7 +528,7 @@ function renderRunForm() {
   // 会把节点换掉，导致光标丢失、输入被打断（值本身存在 RUN_PORTS 里不会丢）
   const ae = document.activeElement;
   if (ae && ae.classList && (ae.classList.contains('item-port')
-      || ['cfgStreams', 'cfgDuration', 'cfgPort', 'cfgPing', 'cfgUdpBw'].includes(ae.id))) {
+      || ['cfgStreams', 'cfgDuration', 'cfgPort', 'cfgTargetPort', 'cfgPing', 'cfgUdpBw'].includes(ae.id))) {
     return;
   }
   const targets = MACHINES.filter(m => m.role === 'target');
@@ -549,7 +553,7 @@ function renderRunForm() {
           <label class="chk" style="gap:6px"><input type="checkbox" value="${m.id}"> ${esc(m.name)}</label>
           <span class="muted">(${meta} · ${v6})</span>
           <label class="muted" style="display:flex;align-items:center;gap:4px;font-size:12px"
-                 title="该机器本次使用的 iperf3 端口（目标机会按用到的端口分别起 server）">端口
+                 title="该机器本次连接目标机用的端口（目标机会为单独指定的端口额外起 server）">连接端口
             <input type="number" class="item-port" data-id="${m.id}" value="${esc(runPort(m))}"
                    min="1" max="65535" step="1" style="width:76px;padding:2px 6px">
           </label>
@@ -609,6 +613,14 @@ async function startRun() {
   const port = readNum('cfgPort', 1, 65535, 'iperf3 端口');
   const ping_count = readNum('cfgPing', 1, 2000, 'ping 次数');
   if (streams === null || duration === null || port === null || ping_count === null) return;
+  // 目标机监听端口：留空 = 跟随默认端口（NAT 后的目标机可以填内网端口）
+  const tpRaw = ($('cfgTargetPort').value || '').trim();
+  let target_port = 0;
+  if (tpRaw !== '') {
+    const tp = parseInt(tpRaw, 10);
+    if (!Number.isFinite(tp) || tp < 1 || tp > 65535) return alert('目标机监听端口需在 1–65535 之间');
+    target_port = tp;
+  }
   const udp = $('cfgUdp').checked;
   const udp_bandwidth = ($('cfgUdpBw').value || '').trim().toUpperCase() || '100M';
   if (udp && !/^\d{1,5}(\.\d{1,3})?[KMG]$/.test(udp_bandwidth)) {
@@ -633,16 +645,19 @@ async function startRun() {
       'IPv6 测试要求每台后端机器与目标机之间都有 IPv6 连通性，\n' +
       '任一机器没有 IPv6 出口都会导致该台测试失败。\n\n' +
       '继续开始 IPv6 测试？')) return;
-  const params = `${streams} 线程 · 上/下行各 ${duration} 秒 · `
-    + `${perMachinePorts ? '端口逐台指定' : `端口 ${port}`} · `
+  const portTxt = perMachinePorts
+    ? `连接端口逐台指定${(target_port && target_port !== port) ? `（目标机监听 ${target_port}）` : ''}`
+    : ((target_port && target_port !== port)
+        ? `目标机监听 ${target_port} / 后端连接 ${port}` : `端口 ${port}`);
+  const params = `${streams} 线程 · 上/下行各 ${duration} 秒 · ${portTxt} · `
     + `${udp ? `UDP（-b ${udp_bandwidth}/流，总目标约 ${streams}×）` : 'TCP'} · ping ${ping_count} 次`;
   const mins = Math.ceil((Math.max(backend_ids.length * (duration * 2 + 5), ping_count) + 30) / 60);
   if (!confirm(`将对所选后端机器逐台执行：\niperf3 ${params}\n测试协议：${proto}\n`
       + `iperf3 全局串行、ping 并行，预计总时长约 ${mins} 分钟。\n确认开始？`)) return;
   try {
     const r = await api('/api/runs', {method: 'POST', body: JSON.stringify({
-      target_id, backend_ids, ip_version, streams, duration, port, udp, udp_bandwidth, ping_count,
-      ports,
+      target_id, backend_ids, ip_version, streams, duration, port, target_port,
+      udp, udp_bandwidth, ping_count, ports,
     })});
     await loadRuns();
     openRun(r.run_id);
@@ -708,7 +723,8 @@ async function pollRun() {
     `目标: ${run.target_name} (${run.target_host}) · 协议: ${run.ip_version === 6 ? 'IPv6' : 'IPv4'}`
     + ` · ${run.udp ? `UDP -b ${run.udp_bandwidth}/流` : 'TCP'} ${run.streams} 线程`
     + ` · 上/下行各 ${run.duration} 秒 · 端口 ${run.port}`
-    + ((d.items || []).some(it => it.port && it.port !== run.port) ? '（部分机器单独指定，见下表）' : '')
+    + ((run.target_port && run.target_port !== run.port) ? `（目标机监听 ${run.target_port}）` : '')
+    + ((d.items || []).some(it => it.port && it.port !== run.port) ? '（部分机器连接端口不同，见下表）' : '')
     + ` · ping ${run.ping_count} 次`
     + ` · 开始: ${run.created_at}`
     + (run.finished_at ? ` · 结束: ${run.finished_at}` : '');
