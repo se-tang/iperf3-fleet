@@ -52,6 +52,11 @@ curl -I https://panel.example.com                   # 返回 200 / 302
 
 > `PANEL_DOMAIN` 没设或为空时 Caddy 起不来（Caddyfile 的站点地址变成空，日志报 Caddyfile 解析错误）——补上域名重新 `docker compose --profile tls up -d` 即可。
 > 80 端口被别的服务占用时 ACME HTTP-01 校验必然失败（拿不到证书），请腾出 80 或改用方式 B。
+>
+> ⚠️ **域名如果开着 Cloudflare 橙云**：Caddy 会把「CF 边缘 IP」当作对端，若把它写进 `X-Forwarded-For`，
+> 面板就会把机器地址记成会不停变化的 CDN 地址（表现为机器列表里的 IP 每几秒变一次、测试报端口不可达）。
+> 当前 `Caddyfile.acme` 已改为优先写 `CF-Connecting-IP`，面板侧也会自动纠偏；最稳妥仍是按 **方式 B** 配
+> （Caddyfile.origin 直接监听 `:443` 并用 CF 源证书）。
 
 **方式 B：80/443 被占用 + Cloudflare 橙云** — 用 Cloudflare 源证书（15 年有效，无需续期）。`Caddyfile.origin` 直接监听 `:443`，**不依赖 `PANEL_DOMAIN`**：
 

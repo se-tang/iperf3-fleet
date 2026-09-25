@@ -146,6 +146,8 @@ summary{cursor:pointer;font-weight:600}
       <label class="chk" style="margin-bottom:6px"><input type="checkbox" id="cfgUdp"> 📦 UDP 测试 -u</label>
       <div class="field" style="width:132px;margin-bottom:0"><label>UDP 带宽/流 -b</label>
         <input id="cfgUdpBw" value="100M" placeholder="100M" disabled></div>
+      <label class="chk" style="margin-bottom:6px" title="一般不需要：后端机默认就用目标机端口，只有个别机器要走不同端口时才勾">
+        <input type="checkbox" id="cfgAdvPorts"> 每台机器单独指定端口</label>
     </div>
     <div class="row"><button class="primary" data-action="startRun">🚀 开始测试</button></div>
     <p class="hint">
@@ -155,8 +157,8 @@ summary{cursor:pointer;font-weight:600}
       UDP <code>-u</code> + 每流目标带宽 <code>-b</code>（<code>-b</code> 按流生效，×线程数 = 总目标带宽）；
       ping 次数 <code>-c</code>（每秒 1 次）。<br>
       端口：以上面的**目标机端口**为准，后端机默认连它；NAT 机只改这一个值即可（商家端口映射一般
-      是同号映射，如公网 43343 → 内网 43343）。个别后端机要走不同端口时，在下面列表里单独改**连接端口**，
-      目标机会为它们额外起 <code>iperf3 -s</code>。<br>
+      是同号映射，如公网 43343 → 内网 43343）。个别后端机确实要走不同端口时，勾上「每台机器单独指定端口」
+      再逐台改，目标机会为它们额外起 <code>iperf3 -s</code>。<br>
       iperf3 全局串行（上/下行各一次）、ping 并行，总时长 ≈ 1 分钟 + 台数 ×（2 × 时长 + 5 秒）。
       目标机需放行所用端口（UDP 测试还需放行该端口的 UDP）与 ICMP，开始前会自动预检。
     </p>
@@ -223,6 +225,9 @@ summary{cursor:pointer;font-weight:600}
       <div class="grid2">
         <div class="field"><label>地区标记（如 香港 / 洛杉矶）</label><input id="mRegion" placeholder="香港"/></div>
         <div class="field"><label>带宽标记（如 500M / 1G / 不限）</label><input id="mBandwidth" placeholder="500M"/></div>
+      </div>
+      <div class="field"><label>手动测试地址（可选，留空 = 自动探测）</label>
+        <input id="mAddr" placeholder="如 82.139.236.141；NAT / 反代后面板观测到的地址不对时填死真实地址"/>
       </div>
       <p class="hint" id="mRoleHint"></p>
       <p class="hint">不保存任何 SSH 凭据；保存后复制接入命令到机器执行即可。接入后自动探测本机 IPv4 / IPv6 地址（用于选择测试协议），无需手动填写。</p>
@@ -347,20 +352,33 @@ function renderMachines() {
     </tr>`).join('');
 }
 
+function testAddr(m, ver) {
+  // 与后端 db.machine_test_ip 同一套规则：手动指定优先，其次自动探测到的该协议族地址
+  const ov = String(m.addr_override || '').trim();
+  if (ov && (ver === 6) === ov.includes(':')) return ov;
+  return (ver === 6 ? m.ip6 : m.ip4) || '';
+}
+
+function hasV6(m) { return !!testAddr(m, 6); }
+
 function addrCell(m) {
   // 探测失败时在地址旁标一个 ⚠️（鼠标悬停看原因），避免「机器在线却一直没有 IPv6」无从排查
   const warn = m.probe_error
     ? ` <span style="cursor:help" title="上次地址探测失败：${esc(m.probe_error)}">⚠️</span>`
     : '';
-  if (!m.ip4 && !m.ip6) {
+  const manual = String(m.addr_override || '').trim()
+    ? ' <span class="muted" title="机器资料里手动指定的测试地址（自动探测结果被忽略）">手动</span>' : '';
+  const a4 = testAddr(m, 4);
+  const a6 = testAddr(m, 6);
+  if (!a4 && !a6) {
     return (m.agent_ip
       ? `<span class="muted">探测中…（接入 IP ${esc(m.agent_ip)}）</span>`
       : '<span class="muted">未接入</span>') + warn;
   }
   // 双栈机器只显示 IPv4（IPv6 是否存在在后端机器备注里标出，不占地址列空间）；
   // 只有 IPv6 的机器才把 IPv6 当测试地址显示
-  if (m.ip4) return `<span class="muted">v4</span> ${esc(m.ip4)}${warn}`;
-  return `<span class="muted">v6</span> ${esc(m.ip6)}${warn}`;
+  if (a4) return `<span class="muted">v4</span> ${esc(a4)}${manual}${warn}`;
+  return `<span class="muted">v6</span> ${esc(a6)}${manual}${warn}`;
 }
 
 function updateRoleHint() {
@@ -376,6 +394,7 @@ function openMachineForm(m) {
   $('mRole').value = m ? m.role : 'backend';
   $('mRegion').value = m ? m.region : '';
   $('mBandwidth').value = m ? m.bandwidth : '';
+  $('mAddr').value = m ? (m.addr_override || '') : '';
   updateRoleHint();
   $('mStepForm').classList.remove('hidden');
   $('mStepAgent').classList.add('hidden');
@@ -451,6 +470,7 @@ async function saveMachine() {
   const body = {
     name: $('mName').value, role: $('mRole').value,
     region: $('mRegion').value, bandwidth: $('mBandwidth').value,
+    addr_override: $('mAddr').value.trim(),
   };
   const id = $('mId').value;
   try {
@@ -536,24 +556,30 @@ function renderRunForm() {
     : null;
   $('targetSelect').innerHTML = targets.length
     ? targets.map(m => {
-        // 测试地址同样只显示 IPv4（没有 IPv4 的机器才显示 IPv6）
-        const addr = m.ip4 ? esc(m.ip4) : (m.ip6 ? `${esc(m.ip6)}（仅 IPv6）` : '地址未探测');
+        // 测试地址同样只显示 IPv4（没有 IPv4 的机器才显示 IPv6），手动指定优先
+        const a4 = testAddr(m, 4);
+        const a6 = testAddr(m, 6);
+        const addr = a4 ? esc(a4) : (a6 ? `${esc(a6)}（仅 IPv6）` : '地址未探测');
         return `<option value="${m.id}">${esc(m.name)}（${addr} · ${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}）</option>`;
       }).join('')
     : '<option value="">— 请先添加一台角色为「目标」的机器 —</option>';
   $('backendList').innerHTML = backends.length
     ? backends.map(m => {
-        // 备注里标出 IPv6 情况（地址列不重复展示；两种状态颜色区分开）+ 该机本次用的端口
+        // 备注里标出 IPv6 情况（地址列不重复展示；两种状态颜色区分开）；
+        // 端口默认跟目标机端口一致，只有勾了「每台机器单独指定端口」才显示输入框
         const meta = `${esc(m.region) || '未标记'} · ${esc(m.bandwidth) || '未标记'}`;
-        const v6 = m.ip6 ? '<span class="v6-yes">有 V6</span>' : '<span class="v6-no">无 IPv6</span>';
+        const v6 = hasV6(m) ? '<span class="v6-yes">有 V6</span>' : '<span class="v6-no">无 IPv6</span>';
+        const adv = $('cfgAdvPorts').checked
+          ? `<label class="muted" style="display:flex;align-items:center;gap:4px;font-size:12px"
+                    title="该机器本次连接目标机用的端口（目标机会为它额外起 server）">连接端口
+               <input type="number" class="item-port" data-id="${m.id}" value="${esc(runPort(m))}"
+                      min="1" max="65535" step="1" style="width:76px;padding:2px 6px">
+             </label>`
+          : '';
         return `<div class="chk" style="gap:8px;flex-wrap:wrap">
           <label class="chk" style="gap:6px"><input type="checkbox" value="${m.id}"> ${esc(m.name)}</label>
           <span class="muted">(${meta} · ${v6})</span>
-          <label class="muted" style="display:flex;align-items:center;gap:4px;font-size:12px"
-                 title="该机器本次连接目标机用的端口（目标机会为单独指定的端口额外起 server）">连接端口
-            <input type="number" class="item-port" data-id="${m.id}" value="${esc(runPort(m))}"
-                   min="1" max="65535" step="1" style="width:76px;padding:2px 6px">
-          </label>
+          ${adv}
         </div>`;
       }).join('')
     : '<span class="muted">暂无后端机器</span>';
@@ -570,24 +596,26 @@ function renderRunForm() {
 function updateIpv6Ui() {
   const cb = $('useIpv6');
   const target = MACHINES.find(m => String(m.id) === $('targetSelect').value);
+  const t6 = target ? testAddr(target, 6) : '';
+  const t4 = target ? testAddr(target, 4) : '';
   const hints = [];
-  if (!target || !target.ip6) {
+  if (!target || !t6) {
     // 目标机没有 IPv6：禁用选项并说明原因（不再静默失败）
     cb.disabled = true;
     cb.checked = false;
     hints.push(target
-      ? '目标机未探测到 IPv6 地址，只能做 IPv4 测试（可点「探测地址」重试）'
+      ? '目标机未探测到 IPv6 地址，只能做 IPv4 测试（可点「探测地址」重试，或在机器资料里手动指定）'
       : '请先选择目标机器');
   } else {
     cb.disabled = false;
     // 目标机只有 IPv6（没有 IPv4）时自动选中，否则默认 IPv4 会直接报错
-    if (!target.ip4 && !cb.checked) {
+    if (!t4 && !cb.checked) {
       cb.checked = true;
       hints.push('该目标机只有 IPv6 地址，已自动选择 IPv6 测试');
     }
-    hints.push(`目标机 IPv6：${target.ip6}`);
+    hints.push(`目标机 IPv6：${t6}`);
     const checked = [...document.querySelectorAll('#backendList input:checked')].map(x => Number(x.value));
-    const no6 = MACHINES.filter(m => checked.includes(m.id) && !m.ip6).map(m => m.name);
+    const no6 = MACHINES.filter(m => checked.includes(m.id) && !hasV6(m)).map(m => m.name);
     if (no6.length) hints.push(`⚠️ 以下后端机器未探测到 IPv6，IPv6 测试可能失败：${no6.join('、')}`);
   }
   $('ipv6Hint').textContent = hints.join(' · ');
@@ -615,18 +643,21 @@ async function startRun() {
   if (udp && !/^\d{1,5}(\.\d{1,3})?[KMG]$/.test(udp_bandwidth)) {
     return alert('UDP 目标带宽必须带单位（示例：100M、1G、500K）');
   }
-  // 每台后端机的端口：没单独改过的用默认端口（不提交，后端按默认值落库）
+  // 每台后端机的端口：没单独改过的用默认端口（不提交，后端按目标机端口落库）
+  const advPorts = $('cfgAdvPorts').checked;
   const ports = {};
   let perMachinePorts = false;
-  for (const id of backend_ids) {
-    const raw = RUN_PORTS[id];
-    if (raw === undefined || raw === null || raw === '') continue;
-    const p = parseInt(raw, 10);
-    if (!Number.isFinite(p) || p < 1 || p > 65535) {
-      return alert(`机器端口需在 1–65535 之间（收到 ${raw}）`);
+  if (advPorts) {
+    for (const id of backend_ids) {
+      const raw = RUN_PORTS[id];
+      if (raw === undefined || raw === null || raw === '') continue;
+      const p = parseInt(raw, 10);
+      if (!Number.isFinite(p) || p < 1 || p > 65535) {
+        return alert(`机器端口需在 1–65535 之间（收到 ${raw}）`);
+      }
+      if (p !== port) perMachinePorts = true;
+      ports[id] = p;
     }
-    if (p !== port) perMachinePorts = true;
-    ports[id] = p;
   }
   const proto = ip_version === 6 ? 'IPv6' : 'IPv4';
   if (ip_version === 6 && !confirm(
@@ -634,12 +665,17 @@ async function startRun() {
       'IPv6 测试要求每台后端机器与目标机之间都有 IPv6 连通性，\n' +
       '任一机器没有 IPv6 出口都会导致该台测试失败。\n\n' +
       '继续开始 IPv6 测试？')) return;
-  const portTxt = perMachinePorts ? '连接端口逐台指定' : `目标机端口 ${port}`;
+  // 把实际要用的目标地址与端口显式写进确认框：地址取错/端口对不上能立刻看出来
+  const tgt = MACHINES.find(m => String(m.id) === String(target_id)) || {};
+  const tgtAddr = testAddr(tgt, ip_version) || '地址未探测';
+  const portTxt = perMachinePorts ? '连接端口逐台指定' : `端口 ${port}`;
   const params = `${streams} 线程 · 上/下行各 ${duration} 秒 · ${portTxt} · `
     + `${udp ? `UDP（-b ${udp_bandwidth}/流，总目标约 ${streams}×）` : 'TCP'} · ping ${ping_count} 次`;
   const mins = Math.ceil((Math.max(backend_ids.length * (duration * 2 + 5), ping_count) + 30) / 60);
-  if (!confirm(`将对所选后端机器逐台执行：\niperf3 ${params}\n测试协议：${proto}\n`
-      + `iperf3 全局串行、ping 并行，预计总时长约 ${mins} 分钟。\n确认开始？`)) return;
+  if (!confirm(`目标机：${tgt.name || target_id} → ${tgtAddr}:${port}\n`
+      + `后端机 ${backend_ids.length} 台，逐台执行：iperf3 -c <目标机> ${perMachinePorts ? '(各自端口)' : `-p ${port}`} `
+      + `-t ${duration} -P ${streams}${udp ? ` -u -b ${udp_bandwidth}` : ''}（+ 下行 -R）\n`
+      + `测试协议：${proto}；预计总时长约 ${mins} 分钟。\n确认开始？`)) return;
   try {
     const r = await api('/api/runs', {method: 'POST', body: JSON.stringify({
       target_id, backend_ids, ip_version, streams, duration, port,
@@ -958,6 +994,12 @@ $('cfgUdp').addEventListener('change', () => {
   const on = $('cfgUdp').checked;
   $('cfgUdpBw').disabled = !on;
   $('cfgUdpBw').style.opacity = on ? '1' : '.55';
+});
+
+$('cfgAdvPorts').addEventListener('change', () => {
+  // 关掉「每台机器单独指定端口」就全部回归目标机端口，避免残留旧值造成对不上
+  if (!$('cfgAdvPorts').checked) RUN_PORTS = {};
+  renderRunForm();
 });
 
 $('backendList').addEventListener('input', e => {

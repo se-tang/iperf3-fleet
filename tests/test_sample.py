@@ -138,6 +138,18 @@ def test_xff_and_limiter():
            environ_base={'REMOTE_ADDR': '172.18.0.1'})
     assert db.get_machine(m1c['id'])['agent_ip'] == '203.0.113.77'
 
+    # 2c) Caddyfile.acme + CF 橙云（配置混用）：Caddy 写进 XFF 的是「对端」= CF 边缘 IP，
+    #     这是个每几秒换一个的 CDN 地址，必须改回 CF-Connecting-IP（CF 写入的真实客户端 IP），
+    #     否则机器地址会被记成 CDN 边缘 IP —— 表现为地址乱跳 + 测试报端口不可达
+    m1d = db.create_machine({'name': 'xff-cfedge', 'role': 'target', 'region': '', 'bandwidth': ''})
+    c.post('/api/agent/heartbeat',
+           headers={'X-Agent-Token': m1d['token'],
+                    'CF-Connecting-IP': '82.139.236.141',
+                    'X-Forwarded-For': '172.67.131.196'},
+           environ_base={'REMOTE_ADDR': '172.18.0.1'})
+    assert db.get_machine(m1d['id'])['agent_ip'] == '82.139.236.141', \
+        db.get_machine(m1d['id'])['agent_ip']
+
     # 3) 公网直连伪造 XFF/CF 头 → 一律不采信，取 remote_addr
     m2 = db.create_machine({'name': 'xff2', 'role': 'backend', 'region': '', 'bandwidth': ''})
     c.post('/api/agent/heartbeat',
@@ -624,6 +636,41 @@ def test_report_params_and_udp_columns():
     print('报告参数行 / UDP 列 / 换端口 OK')
 
 
+def test_machine_addr_override():
+    """手动测试地址：NAT / 反代后面板观测到的地址不对时的兜底（填了就按它测）。"""
+    from app import db
+    from app.app import app as flask_app
+    db.init_db()
+    c = flask_app.test_client()
+    _login(c)
+
+    # 建机器时带手动地址
+    r = c.post('/api/machines', json={'name': 'nat-t', 'role': 'target', 'region': '德国',
+                                      'bandwidth': '1G', 'addr_override': '82.139.236.141'})
+    assert r.status_code == 200, r.get_json()
+    m = r.get_json()
+    assert m['addr_override'] == '82.139.236.141'
+    # 心跳观测到的地址（哪怕是错的 CDN 地址）不能覆盖手动指定
+    db.touch_machine(m['id'], 'nat-t', '172.67.131.196')
+    m = db.get_machine(m['id'])
+    assert m['ip4'] == '172.67.131.196'
+    assert db.machine_test_ip(m, 4) == '82.139.236.141'
+    # 手动地址是 v6 时只影响 v6，v4 仍用自动探测值
+    db.update_machine(m['id'], {'name': 'nat-t', 'role': 'target', 'region': '德国',
+                                'bandwidth': '1G', 'addr_override': '2606:4700:4700::1111'})
+    m = db.get_machine(m['id'])
+    assert db.machine_test_ip(m, 6) == '2606:4700:4700::1111'
+    assert db.machine_test_ip(m, 4) == '172.67.131.196'
+    # 清空后回归自动
+    db.update_machine(m['id'], {'name': 'nat-t', 'role': 'target', 'region': '德国',
+                                'bandwidth': '1G', 'addr_override': ''})
+    assert db.machine_test_ip(db.get_machine(m['id']), 4) == '172.67.131.196'
+    # 非法地址要被拒绝（400），不能悄悄存进去
+    r = c.post('/api/machines', json={'name': 'bad', 'role': 'backend', 'addr_override': '1.2.3'})
+    assert r.status_code == 400 and 'IP' in r.get_json()['error'], r.get_json()
+    print('手动测试地址 OK')
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
@@ -638,4 +685,5 @@ if __name__ == '__main__':
     test_test_params()
     test_multistream_and_udp_parse()
     test_report_params_and_udp_columns()
+    test_machine_addr_override()
     print('\nALL TESTS PASSED')
