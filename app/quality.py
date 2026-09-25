@@ -2,10 +2,14 @@
 import json
 import re
 
-# iperf3 汇总行，如: [  5]   0.00-10.00  sec   163 MBytes   137 Mbits/sec    0            sender
+# iperf3 汇总行。TCP： [  5] 0.00-10.00 sec 163 MBytes 137 Mbits/sec 0        sender
+#               UDP： [  5] 0.00-10.00 sec 116 MBytes 97.3 Mbits/sec 0.015 ms 412/69894 (0.59%) receiver
 SUM_RE = re.compile(
     r'^\[\s*(?:\d+|SUM)\s*\]\s+([\d.]+)\s*-\s*([\d.]+)\s+sec\s+'
-    r'([\d.]+)\s+([KMG]?Bytes)\s+([\d.]+)\s+([KMG]?bits)/sec(?:\s+(\d+))?\s+(sender|receiver)\s*$',
+    r'([\d.]+)\s+([KMG]?Bytes)\s+([\d.]+)\s+([KMG]?bits)/sec'
+    r'(?:\s+(\d+))?'                                        # TCP：Retr（接收行通常没有）
+    r'(?:\s+([\d.]+)\s+ms\s+(\d+)/(\d+)\s+\(([\d.]+)%\))?'  # UDP：Jitter + Lost/Total(丢包率)
+    r'\s+(sender|receiver)\s*$',
     re.IGNORECASE)
 # 汇总区表头，如: [ ID] Interval           Transfer     Bitrate         Retr
 HEADER_RE = re.compile(r'^\[\s*ID\s*\]')
@@ -34,7 +38,11 @@ def _to_mb(val, unit):
 
 
 def parse_iperf(out):
-    """返回 (sender, receiver) 两条汇总行，各含 mbits / transfer_mb / retr。"""
+    """返回 (sender, receiver) 两条汇总行，含 mbits / transfer_mb / retr（TCP）/ 抖动与丢包（UDP）。
+
+    多线程（-P N）时 iperf3 会先逐流打印 sender/receiver 行，最后再给 [SUM] 汇总行；
+    这里只保留最后出现的 sender / receiver，即 [SUM] 行（单流时就是那一行）。
+    """
     sender = None
     receiver = None
     for line in (out or '').splitlines():
@@ -44,9 +52,15 @@ def parse_iperf(out):
         entry = {
             'transfer_mb': _to_mb(m.group(3), m.group(4)),
             'mbits': _to_mbits(m.group(5), m.group(6)),
-            'retr': int(m.group(7)) if m.group(7) else 0,
         }
-        if m.group(8).lower() == 'sender':
+        if m.group(7) is not None:
+            entry['retr'] = int(m.group(7))       # UDP 行没有该列，保持 None 表示不适用
+        if m.group(8) is not None:
+            entry['jitter_ms'] = float(m.group(8))
+            entry['lost'] = int(m.group(9))
+            entry['total'] = int(m.group(10))
+            entry['loss_pct'] = float(m.group(11))
+        if m.group(12).lower() == 'sender':
             sender = entry
         else:
             receiver = entry
@@ -111,6 +125,13 @@ def parse_metrics(ping_raw, up_raw, down_raw):
     mt['down_mbits'] = mt['down_receiver_mbits']
     retrs = [e['retr'] for e in (us, ds) if e and e.get('retr') is not None]
     mt['retr_total'] = sum(retrs) if retrs else None
+    # UDP：丢包与抖动只有接收端统计得准（发送端恒为 0），上下行都取 receiver 那一行
+    for tag, rcv in (('up', ur), ('down', dr)):
+        udp = rcv if (rcv and 'loss_pct' in rcv) else None
+        mt[f'{tag}_udp_loss_pct'] = udp['loss_pct'] if udp else None
+        mt[f'{tag}_jitter_ms'] = udp['jitter_ms'] if udp else None
+        mt[f'{tag}_udp_lost'] = udp['lost'] if udp else None
+    mt['udp'] = any(mt.get(k) is not None for k in ('up_udp_loss_pct', 'down_udp_loss_pct'))
     mt['ping_block'] = ping_block(ping_raw)
     mt['up_block'] = summary_block(up_raw)
     mt['down_block'] = summary_block(down_raw)
@@ -185,6 +206,33 @@ def evaluate(mt, machine):
             pen += 3
             notes.append(f'重传{retr}次严重')
 
+    # UDP：以 iperf3 接收端统计的丢包与抖动为准（ping 的 mdev 仍单独参与评价）
+    udp_losses = [v for v in (mt.get('up_udp_loss_pct'), mt.get('down_udp_loss_pct')) if v is not None]
+    if udp_losses:
+        worst = max(udp_losses)
+        if worst == 0:
+            notes.append('UDP 0%丢包')
+        elif worst <= 0.5:
+            notes.append(f'UDP 丢包{fmt_num(worst, 2)}%轻微')
+        elif worst <= 2:
+            pen += 1
+            notes.append(f'UDP 丢包{fmt_num(worst, 2)}%偏多')
+        else:
+            pen += 2
+            notes.append(f'UDP 丢包{fmt_num(worst, 2)}%严重')
+
+    jitters = [v for v in (mt.get('up_jitter_ms'), mt.get('down_jitter_ms')) if v is not None]
+    if jitters:
+        worst_j = max(jitters)
+        if worst_j <= 1:
+            notes.append(f'iperf3 抖动{fmt_num(worst_j, 2)}ms极小')
+        elif worst_j <= 5:
+            pen += 1
+            notes.append(f'iperf3 抖动{fmt_num(worst_j, 2)}ms略大')
+        else:
+            pen += 2
+            notes.append(f'iperf3 抖动{fmt_num(worst_j, 2)}ms偏大')
+
     us_, ur_ = mt.get('up_sender_mbits'), mt.get('up_receiver_mbits')
     if us_ and ur_ and ur_ / us_ < 0.9:
         pen += 1 if ur_ / us_ >= 0.7 else 2
@@ -239,9 +287,24 @@ def mask_report_text(text):
     return _IPV4_RE.sub(r'\1.*.*', text)
 
 
+def run_params_text(run):
+    """报告里的「测试参数」描述（旧记录没有这些列时退回默认值）。"""
+    streams = int(run.get('streams') or 1)
+    duration = int(run.get('duration') or 10)
+    port = int(run.get('port') or 5201)
+    ping_count = int(run.get('ping_count') or 200)
+    kind = ('UDP（-u，目标带宽 %s/流）' % (run.get('udp_bandwidth') or '100M')
+            if int(run.get('udp') or 0) else 'TCP')
+    return (f'iperf3 {streams} 线程（-P）× 上行 / 下行（-R）各 {duration} 秒（-t），'
+            f'端口 {port}，{kind}；`ping -c {ping_count} -i 1`；'
+            f'iperf3 全局串行，ping 与其它机器的 iperf3 并行')
+
+
 def build_report(run, target, items):
     """生成 Markdown 报告：汇总表（含线路质量评价列）+ 每台机器的原始摘录。"""
     proto = 'IPv6' if int(run.get('ip_version') or 4) == 6 else 'IPv4'
+    udp = bool(int(run.get('udp') or 0))
+    ncols = 11 if udp else 10
     lines = []
     lines.append('# iperf3 线路质量测试报告')
     lines.append('')
@@ -249,27 +312,40 @@ def build_report(run, target, items):
         f"- **目标机器**：{target['name']}"
         f"（{target.get('region') or '地区未标记'} · {target.get('bandwidth') or '带宽未标记'} · `{mask_ip(target.get('host'))}`）")
     lines.append(f"- **测试协议**：{proto}（后端发起端与目标被测端均使用 {proto}）")
+    lines.append(f"- **测试参数**：{run_params_text(run)}")
     lines.append(f"- **测试时间**：{run['created_at']} ~ {run.get('finished_at') or ''}")
-    lines.append('- **测试方式**：iperf3 单线程 10 秒 ×（上行 / 下行 -R）+ `ping -c 200 -i 1`；iperf3 全局串行，ping 与其它机器的 iperf3 并行')
     lines.append('')
-    lines.append('| 后端机器 | 地区 | 带宽 | 丢包率 | RTT avg | 抖动 mdev | 上行 (sender) | 下行 (receiver) | 重传 | 线路质量评价 |')
-    lines.append('|---|---|---|---|---|---|---|---|---|---|')
+    if udp:
+        lines.append('| 后端机器 | 地区 | 带宽 | ping 丢包 | RTT avg | ping 抖动 | 上行 (sender) '
+                     '| 下行 (receiver) | UDP 丢包 上/下 | UDP 抖动 上/下 | 线路质量评价 |')
+        lines.append('|---|---|---|---|---|---|---|---|---|---|---|')
+    else:
+        lines.append('| 后端机器 | 地区 | 带宽 | 丢包率 | RTT avg | 抖动 mdev | 上行 (sender) '
+                     '| 下行 (receiver) | 重传 | 线路质量评价 |')
+        lines.append('|---|---|---|---|---|---|---|---|---|---|')
     for it in items:
         name = it['machine_name']
         region = it['machine_region'] or '—'
         bw = it['machine_bandwidth'] or '—'
         if it['status'] == 'done' and it['metrics']:
             mt = json.loads(it['metrics'])
-            lines.append(
-                f"| {name} | {region} | {bw} "
-                f"| {fmt_num(mt.get('loss_pct'))}% | {fmt_num(mt.get('rtt_avg'))} ms "
-                f"| {fmt_num(mt.get('mdev_ms'), 2)} ms "
-                f"| {fmt_num(mt.get('up_mbits'))} Mbit/s | {fmt_num(mt.get('down_mbits'))} Mbit/s "
-                f"| {fmt_num(mt.get('retr_total'), 0)} "
-                f"| **{mt.get('rating', '—')}**：{mt.get('rating_detail', '—')} |")
+            row = (f"| {name} | {region} | {bw} "
+                   f"| {fmt_num(mt.get('loss_pct'))}% | {fmt_num(mt.get('rtt_avg'))} ms "
+                   f"| {fmt_num(mt.get('mdev_ms'), 2)} ms "
+                   f"| {fmt_num(mt.get('up_mbits'))} Mbit/s | {fmt_num(mt.get('down_mbits'))} Mbit/s ")
+            if udp:
+                row += (f"| {fmt_num(mt.get('up_udp_loss_pct'), 2)}% / "
+                        f"{fmt_num(mt.get('down_udp_loss_pct'), 2)}% "
+                        f"| {fmt_num(mt.get('up_jitter_ms'), 3)} / "
+                        f"{fmt_num(mt.get('down_jitter_ms'), 3)} ms ")
+            else:
+                row += f"| {fmt_num(mt.get('retr_total'), 0)} "
+            lines.append(row + f"| **{mt.get('rating', '—')}**：{mt.get('rating_detail', '—')} |")
         else:
             err = (it['error'] or it['status']).replace('|', '\\|').replace('\n', ' ')
-            lines.append(f"| {name} | {region} | {bw} | — | — | — | — | — | — | ❌ 失败：{err} |")
+            lines.append(f"| {name} | {region} | {bw} | "
+                         + ' | '.join(['—'] * (ncols - 4))
+                         + f" | ❌ 失败：{err} |")
 
     lines.append('')
     lines.append('## 原始数据')

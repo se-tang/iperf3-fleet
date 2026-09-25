@@ -417,6 +417,142 @@ def test_probe_error_surfaced():
     print('地址探测失败原因回传 OK:', got['probe_error'][:30])
 
 
+def test_test_params():
+    """测试参数：校验、iperf3 命令拼装、端口/协议落到 Agent 脚本上。"""
+    from app import agent_jobs as aj
+    from app import runner
+
+    # 1) 默认值与历史行为一致（单线程 / 10 秒 / 5201 / ping 200 / TCP）
+    cfg = runner.normalize_params({})
+    assert cfg == {'streams': 1, 'duration': 10, 'port': 5201, 'ping_count': 200,
+                   'udp': False, 'udp_bandwidth': '100M'}, cfg
+
+    # 2) 自定义值（字符串数字、带宽大小写归一）
+    cfg = runner.normalize_params({'streams': '4', 'duration': 30, 'port': '6500',
+                                   'ping_count': 50, 'udp': True, 'udp_bandwidth': '200m'})
+    assert cfg == {'streams': 4, 'duration': 30, 'port': 6500, 'ping_count': 50,
+                   'udp': True, 'udp_bandwidth': '200M'}, cfg
+
+    # 3) 越界/非法值必须报错，而不是悄悄换成别的参数
+    for bad in ({'streams': 0}, {'streams': 99}, {'duration': 0}, {'duration': 9999},
+                {'port': 0}, {'port': 70000}, {'ping_count': 0}, {'ping_count': 99999},
+                {'streams': 'x'}, {'udp_bandwidth': '100'}):
+        try:
+            runner.normalize_params(bad)
+            raise AssertionError(f'{bad} 应该被拒绝')
+        except RuntimeError:
+            pass
+
+    # 4) 命令拼装：端口 / 线程 / 时长 / UDP / 下行
+    tcp = dict(cfg, udp=False, udp_bandwidth='100M')
+    assert runner.build_iperf_cmd('1.2.3.4', tcp) == 'iperf3 -c 1.2.3.4 -p 6500 -t 30 -P 4', tcp
+    assert runner.build_iperf_cmd('1.2.3.4', tcp, reverse=True) == \
+        'iperf3 -c 1.2.3.4 -p 6500 -t 30 -P 4 -R'
+    udp_cmd = runner.build_iperf_cmd('2606:4700:4700::1111', dict(tcp, udp=True, udp_bandwidth='200M'))
+    assert udp_cmd == 'iperf3 -c 2606:4700:4700::1111 -p 6500 -t 30 -P 4 -u -b 200M', udp_cmd
+
+    # 5) 端口等参数要真的落到 Agent 脚本里
+    assert '-p 6500' in aj.script_start_server(6500)
+    assert '5201' not in aj.script_start_server(6500)
+    assert 'port="6500"' in aj.script_check_port('1.2.3.4', 6500)
+    assert aj.valid_port(0) == 5201 and aj.valid_port(70000) == 5201
+    assert aj.valid_port('abc') == 5201 and aj.valid_port('6500') == 6500
+
+    # 6) API 层：非法参数返回 400 且说明原因（合法参数会真的开跑，不在此测试）
+    from app import db
+    from app.app import app as flask_app
+    db.init_db()
+    t = db.create_machine({'name': 'param-t', 'role': 'target', 'region': '', 'bandwidth': ''})
+    b = db.create_machine({'name': 'param-b', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    c = flask_app.test_client()
+    _login(c)
+    r = c.post('/api/runs', json={'target_id': t['id'], 'backend_ids': [b['id']], 'streams': 999})
+    assert r.status_code == 400 and '线程数' in r.get_json()['error'], r.get_json()
+    r = c.post('/api/runs', json={'target_id': t['id'], 'backend_ids': [b['id']],
+                                  'udp': True, 'udp_bandwidth': '100'})
+    assert r.status_code == 400 and '带宽' in r.get_json()['error'], r.get_json()
+    print('测试参数校验 / iperf3 命令拼装 OK:', runner.build_iperf_cmd('1.2.3.4', tcp))
+
+
+def _login(client):
+    """测试用：读面板首次初始化写在 .initial_password 的密码登录一次。
+
+    先清掉登录限速状态——前面的用例会故意打失败登录把测试客户端 IP 锁住。
+    """
+    from app import db
+    from app import app as app_module
+    app_module._login_fails.clear()
+    user, _ = db.get_auth()
+    with open(db.INITIAL_PW_PATH, encoding='utf-8') as f:
+        pw = f.read().strip()
+    r = client.post('/api/login', json={'user': user, 'password': pw})
+    assert r.status_code == 200, r.get_json()
+
+
+def test_multistream_and_udp_parse():
+    """多线程（-P）取 [SUM] 汇总行；UDP 的丢包/抖动取接收端，且不适用重传。"""
+    from app import quality
+
+    up = ('[ ID] Interval           Transfer     Bitrate         Retr\n'
+          '[  4]   0.00-10.00  sec  25.0 MBytes  21.0 Mbits/sec    0             sender\n'
+          '[  4]   0.00-10.00  sec  24.9 MBytes  20.9 Mbits/sec                  receiver\n'
+          '[  6]   0.00-10.00  sec  25.1 MBytes  21.0 Mbits/sec    1             sender\n'
+          '[  6]   0.00-10.00  sec  25.0 MBytes  20.9 Mbits/sec                  receiver\n'
+          '[SUM]   0.00-10.00  sec   100 MBytes  83.9 Mbits/sec    1             sender\n'
+          '[SUM]   0.00-10.00  sec  99.8 MBytes  83.7 Mbits/sec                  receiver\n')
+    s, r = quality.parse_iperf(up)
+    assert s['mbits'] == 83.9 and r['mbits'] == 83.7 and s['retr'] == 1, (s, r)
+    assert 'SUM' in quality.summary_block(up)
+
+    udp_up = ('[ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams\n'
+              '[  4]   0.00-10.00  sec   115 MBytes  96.4 Mbits/sec  0.000 ms  0/8320 (0%)  sender\n'
+              '[  4]   0.00-10.00  sec   114 MBytes  95.9 Mbits/sec  0.019 ms  12/8320 (0.14%)  receiver\n')
+    udp_down = ('[ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams\n'
+                '[  4]   0.00-10.00  sec   110 MBytes  92.3 Mbits/sec  0.000 ms  0/7960 (0%)  sender\n'
+                '[  4]   0.00-10.00  sec   109 MBytes  91.6 Mbits/sec  0.031 ms  40/7960 (0.5%)  receiver\n')
+    mt = quality.parse_metrics(PING_RAW, udp_up, udp_down)
+    assert mt['udp'] is True
+    assert mt['up_udp_loss_pct'] == 0.14 and mt['down_udp_loss_pct'] == 0.5, mt
+    assert mt['up_jitter_ms'] == 0.019 and mt['down_jitter_ms'] == 0.031, mt
+    assert mt['retr_total'] is None, mt          # UDP 没有重传概念
+    assert mt['up_mbits'] == 96.4 and mt['down_mbits'] == 91.6, mt
+    quality.evaluate(mt, {'bandwidth': ''})
+    assert 'UDP 丢包' in mt['rating_detail'] and 'iperf3 抖动' in mt['rating_detail'], mt
+    print('多线程 / UDP 解析 OK:', mt['rating'], '|', mt['rating_detail'])
+
+
+def test_report_params_and_udp_columns():
+    """报告写明本次参数；UDP 测试把「重传」列换成 UDP 丢包 / 抖动。"""
+    import json as _json
+    from app import quality
+
+    udp_up = ('[ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams\n'
+              '[  4]   0.00-10.00  sec   115 MBytes  96.4 Mbits/sec  0.000 ms  0/8320 (0%)  sender\n'
+              '[  4]   0.00-10.00  sec   114 MBytes  95.9 Mbits/sec  0.019 ms  12/8320 (0.14%)  receiver\n')
+    mt = quality.parse_metrics(PING_RAW, udp_up, udp_up)
+    quality.evaluate(mt, {'bandwidth': ''})
+    items = [{'machine_name': 'HK-01', 'machine_region': '香港', 'machine_bandwidth': '500M',
+              'machine_host': '5.6.7.8', 'status': 'done', 'error': '',
+              'metrics': _json.dumps(mt, ensure_ascii=False)}]
+    run = {'created_at': 't0', 'finished_at': 't1', 'ip_version': 4, 'error': '',
+           'target_name': 'T', 'target_host': '1.2.3.4', 'streams': 4, 'duration': 30,
+           'port': 6500, 'udp': 1, 'udp_bandwidth': '200M', 'ping_count': 50}
+    rep = quality.build_report(run, {'name': 'T', 'host': '1.2.3.4', 'region': '', 'bandwidth': ''}, items)
+    assert ('- **测试参数**：iperf3 4 线程（-P）× 上行 / 下行（-R）各 30 秒（-t），'
+            '端口 6500，UDP（-u，目标带宽 200M/流）') in rep, rep
+    assert 'UDP 丢包 上/下' in rep and 'UDP 抖动 上/下' in rep, rep
+    assert '重传' not in rep.split('## 原始数据')[0], rep
+
+    # 旧记录（没有参数列）退回默认参数，TCP 表头保留重传列
+    old = {'created_at': 't0', 'finished_at': 't1', 'ip_version': 4, 'error': '',
+           'target_name': 'T', 'target_host': '1.2.3.4'}
+    rep2 = quality.build_report(old, {'name': 'T', 'host': '1.2.3.4', 'region': '', 'bandwidth': ''}, items)
+    assert ('- **测试参数**：iperf3 1 线程（-P）× 上行 / 下行（-R）各 10 秒（-t），'
+            '端口 5201，TCP') in rep2, rep2
+    assert '| 重传 |' in rep2, rep2
+    print('报告参数行 / UDP 列 OK')
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
@@ -428,4 +564,7 @@ if __name__ == '__main__':
     test_probe_script()
     test_job_ids()
     test_probe_error_surfaced()
+    test_test_params()
+    test_multistream_and_udp_parse()
+    test_report_params_and_udp_columns()
     print('\nALL TESTS PASSED')

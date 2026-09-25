@@ -17,7 +17,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import db, quality, runner
 
-APP_VERSION = '2.7.0'
+APP_VERSION = '2.8.0'
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
@@ -387,7 +387,7 @@ def api_run_create():
         backend_ids = [int(x) for x in (data.get('backend_ids') or [])]
         # 默认 IPv4（两端都用 IPv4，避免机器缺 IPv6 时失败）；ip_version=6 才走 IPv6
         ip_version = 6 if str(data.get('ip_version') or '4').strip() == '6' else 4
-        run_id = runner.start_run(target_id, backend_ids, ip_version)
+        run_id = runner.start_run(target_id, backend_ids, ip_version, params=data)
     except (RuntimeError, ValueError, TypeError) as e:
         return jsonify({'error': str(e)}), 400
     return jsonify({'run_id': run_id})

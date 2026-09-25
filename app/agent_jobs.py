@@ -2,6 +2,16 @@
 import ipaddress
 import re
 
+
+def valid_port(port, default=5201):
+    """把用户填的端口收敛成 1–65535 的整数，非法值退回默认端口。"""
+    try:
+        p = int(str(port).strip())
+    except (TypeError, ValueError):
+        return default
+    return p if 1 <= p <= 65535 else default
+
+
 # 检查并安装 iperf3 / ping（apt → dnf → yum+epel → apk → zypper 依次尝试）
 SCRIPT_ENSURE = r'''
 export DEBIAN_FRONTEND=noninteractive
@@ -49,11 +59,12 @@ fi
 # 用 PID 文件管理进程，不硬依赖 pgrep/pkill（后者仅作为残留进程的补充清扫）
 # timeout 1800：server 30 分钟自过期，防止面板崩溃/任务中断后残留进程被扫描器滥用
 # （过期后若有后续测试，通道内端口预检失败会自动重启 server）
-SCRIPT_START_SERVER = r'''
+# 端口由用户自定义（默认 5201），模板里用 __PORT__ 占位后替换，避免 format 转义问题
+SCRIPT_START_SERVER_TMPL = r'''
 [ -f /tmp/iperf3-server.pid ] && kill "$(cat /tmp/iperf3-server.pid)" 2>/dev/null
 command -v pkill >/dev/null 2>&1 && pkill -f 'iperf3 -s' 2>/dev/null
 sleep 0.5
-nohup timeout 1800 iperf3 -s > /tmp/iperf3-server.log 2>&1 &
+nohup timeout 1800 iperf3 -s -p __PORT__ > /tmp/iperf3-server.log 2>&1 &
 echo $! > /tmp/iperf3-server.pid
 sleep 1
 if kill -0 "$(cat /tmp/iperf3-server.pid)" 2>/dev/null; then
@@ -65,6 +76,12 @@ else
 fi
 '''.strip()
 
+
+def script_start_server(port=5201):
+    """启动目标机的 iperf3 server（TCP/UDP 共用同一个 -s 进程，端口可自定义）。"""
+    return SCRIPT_START_SERVER_TMPL.replace('__PORT__', str(valid_port(port)))
+
+
 SCRIPT_STOP_SERVER = r'''
 [ -f /tmp/iperf3-server.pid ] && kill "$(cat /tmp/iperf3-server.pid)" 2>/dev/null
 command -v pkill >/dev/null 2>&1 && pkill -f 'iperf3 -s' 2>/dev/null
@@ -72,13 +89,14 @@ echo IPERF3_SERVER_STOPPED
 '''.strip()
 
 
-def script_check_port(ip):
-    """探测目标机 5201 端口。IPv4 优先用 bash /dev/tcp（瞬时完成），不可用时回退 curl；
+def script_check_port(ip, port=5201):
+    """探测目标机 iperf3 端口是否可达。IPv4 优先用 bash /dev/tcp（瞬时完成），不可用时回退 curl；
     IPv6 直接用 curl（bash 的 /dev/tcp 不支持 IPv6 字面量，地址需带方括号）。
-    连接被拒=7 / 连接超时=28 视为不通，其余视为可达。"""
+    连接被拒=7 / 连接超时=28 视为不通，其余视为可达（iperf3 不是 HTTP，能连上就算通）。"""
+    port = valid_port(port)
     host = f'[{ip}]' if ipaddress.ip_address(ip).version == 6 else ip
     return (
-        'host="{host}"; port="5201"\n'
+        'host="{host}"; port="{port}"\n'
         'probe() {{\n'
         '  if [ {ipv6} != "1" ] && command -v bash >/dev/null 2>&1; then\n'
         '    if timeout 4 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then return 0; fi\n'
@@ -91,7 +109,7 @@ def script_check_port(ip):
         '  return 1\n'
         '}}\n'
         'if probe; then echo PORT_OK; else echo PORT_BLOCKED; exit 1; fi'
-    ).format(host=host, ipv6='1' if ipaddress.ip_address(ip).version == 6 else '0')
+    ).format(host=host, port=port, ipv6='1' if ipaddress.ip_address(ip).version == 6 else '0')
 
 
 # 探测本机可用于测试的全局 IPv4 / IPv6 地址。

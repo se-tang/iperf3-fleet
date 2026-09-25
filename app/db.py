@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS runs (
     target_region TEXT NOT NULL DEFAULT '',
     target_bandwidth TEXT NOT NULL DEFAULT '',
     ip_version INTEGER NOT NULL DEFAULT 4,
+    streams INTEGER NOT NULL DEFAULT 1,
+    duration INTEGER NOT NULL DEFAULT 10,
+    port INTEGER NOT NULL DEFAULT 5201,
+    udp INTEGER NOT NULL DEFAULT 0,
+    udp_bandwidth TEXT NOT NULL DEFAULT '100M',
+    ping_count INTEGER NOT NULL DEFAULT 200,
     status TEXT NOT NULL DEFAULT 'running',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     finished_at TEXT,
@@ -136,6 +142,15 @@ def init_db():
     cols_r = [r['name'] for r in db.execute('PRAGMA table_info(runs)').fetchall()]
     if cols_r and 'ip_version' not in cols_r:
         db.execute('ALTER TABLE runs ADD COLUMN ip_version INTEGER NOT NULL DEFAULT 4')
+    # v2.8：测试参数从写死（单线程 / 10 秒 / 5201 / ping 200）改为每次可自定义
+    for col, ddl in (('streams', 'INTEGER NOT NULL DEFAULT 1'),
+                     ('duration', 'INTEGER NOT NULL DEFAULT 10'),
+                     ('port', 'INTEGER NOT NULL DEFAULT 5201'),
+                     ('udp', 'INTEGER NOT NULL DEFAULT 0'),
+                     ('udp_bandwidth', "TEXT NOT NULL DEFAULT '100M'"),
+                     ('ping_count', 'INTEGER NOT NULL DEFAULT 200')):
+        if cols_r and col not in cols_r:
+            db.execute(f'ALTER TABLE runs ADD COLUMN {col} {ddl}')
     for row in db.execute("SELECT id FROM machines WHERE sign_key=''").fetchall():
         db.execute('UPDATE machines SET sign_key=? WHERE id=?', (secrets.token_hex(32), row['id']))
     cols_tb = [r['name'] for r in db.execute('PRAGMA table_info(agent_tombstones)').fetchall()]
@@ -425,15 +440,20 @@ def pop_tombstone(token):
 
 # ---------------- runs ----------------
 
-def create_run(target, backend_ids, ip_version=4, target_host=''):
+def create_run(target, backend_ids, ip_version=4, target_host='', **params):
+    """新建一次测试记录；params 为本次测试参数（线程/时长/端口/协议/ping 次数）。"""
     db = get_db()
     ip_version = 6 if int(ip_version or 4) == 6 else 4
     cur = db.execute(
         'INSERT INTO runs (target_id, target_name, target_host, target_region, target_bandwidth, '
-        'ip_version) VALUES (?,?,?,?,?,?)',
+        'ip_version, streams, duration, port, udp, udp_bandwidth, ping_count) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
         (target['id'], target['name'],
          target_host or (target['agent_ip'] or 'IP待agent上报'),
-         target['region'], target['bandwidth'], ip_version))
+         target['region'], target['bandwidth'], ip_version,
+         int(params.get('streams') or 1), int(params.get('duration') or 10),
+         int(params.get('port') or 5201), 1 if params.get('udp') else 0,
+         str(params.get('udp_bandwidth') or '100M'), int(params.get('ping_count') or 200)))
     run_id = cur.lastrowid
     for bid in backend_ids:
         m = get_machine(bid)

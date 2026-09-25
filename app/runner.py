@@ -1,15 +1,18 @@
-"""测试编排 v2：通过 Agent 任务队列远程执行（面板不再直连机器）。
+"""测试编排：通过 Agent 任务队列远程执行（面板不再直连机器）。
 
 流水线：iperf3 上/下行全局串行（多台同时测速会互相抢带宽，结果作废），
-ping 200 次不占测速通道，与后续机器的 iperf3 并行执行，充分利用等待时间。
-总时长 ≈ 环境准备 + 台数×25 秒 + 最后 200 秒。
+ping 不占测速通道，与后续机器的 iperf3 并行执行，充分利用等待时间。
 
-测试协议：默认 IPv4（两端都用 IPv4 地址，避免机器缺 IPv6 时失败）；
+测试参数每次可自定义（见 normalize_params / build_iperf_cmd）：
+线程数 -P、单向时长 -t、iperf3 端口 -p、TCP/UDP（-u -b）、ping 次数 -c。
+
+协议：默认 IPv4（两端都用 IPv4 地址，避免机器缺 IPv6 时失败）；
 用户确认双端都支持 IPv6 时可选择 IPv6 测试。地址取自机器资料
 （心跳观测 + 面板探测，见 db.machine_test_ip）。
 """
 import ipaddress
 import json
+import re
 import shlex
 import threading
 import time
@@ -18,8 +21,71 @@ import traceback
 from . import agent_jobs as aj
 from . import db, quality
 
+# 测试参数默认值与上限（前端只做提示，这里才是准入门槛）
+DEFAULT_PARAMS = {'streams': 1, 'duration': 10, 'port': 5201,
+                  'udp': False, 'udp_bandwidth': '100M', 'ping_count': 200}
+# UDP 目标带宽：必须带单位（-b 100 在 iperf3 里是 100 bit/s，太容易填错）
+_UDP_BW_RE = re.compile(r'^\d{1,5}(?:\.\d{1,3})?[KMG]$')
+
 _state_lock = threading.Lock()
 _active = {}  # run_id -> {'stop': bool, 'log': [..]}
+
+
+def normalize_params(data):
+    """校验并收敛前端传来的测试参数；非法值直接报错，不静默改动用户输入。"""
+    data = data or {}
+
+    def num(key, lo, hi, label):
+        raw = data.get(key)
+        if raw is None or str(raw).strip() == '':
+            return DEFAULT_PARAMS[key]
+        try:
+            v = int(str(raw).strip())
+        except (TypeError, ValueError):
+            raise RuntimeError(f'{label}必须是整数（收到 {raw!r}）')
+        if not lo <= v <= hi:
+            raise RuntimeError(f'{label}需在 {lo}–{hi} 之间（收到 {v}）')
+        return v
+
+    bw = str(data.get('udp_bandwidth') or DEFAULT_PARAMS['udp_bandwidth']).strip().upper()
+    if not _UDP_BW_RE.match(bw):
+        raise RuntimeError('UDP 目标带宽必须带单位（示例：100M、1G、500K）')
+    return {
+        'streams': num('streams', 1, 32, '线程数'),
+        'duration': num('duration', 1, 300, '单向测试时长（秒）'),
+        'port': num('port', 1, 65535, 'iperf3 端口'),
+        'ping_count': num('ping_count', 1, 2000, 'ping 次数'),
+        'udp': bool(data.get('udp')),
+        'udp_bandwidth': bw,
+    }
+
+
+def run_cfg(run):
+    """从测试记录里取出参数（旧记录缺列时退回默认值）。"""
+    bw = str((run or {}).get('udp_bandwidth') or DEFAULT_PARAMS['udp_bandwidth']).strip().upper()
+    return {
+        'streams': int(run.get('streams') or DEFAULT_PARAMS['streams']),
+        'duration': int(run.get('duration') or DEFAULT_PARAMS['duration']),
+        'port': aj.valid_port(run.get('port') or DEFAULT_PARAMS['port']),
+        'ping_count': int(run.get('ping_count') or DEFAULT_PARAMS['ping_count']),
+        'udp': bool(int(run.get('udp') or 0)),
+        'udp_bandwidth': bw if _UDP_BW_RE.match(bw) else DEFAULT_PARAMS['udp_bandwidth'],
+    }
+
+
+def build_iperf_cmd(host, cfg, reverse=False):
+    """拼 iperf3 客户端命令（host 由调用方保证是合法 IP，仍然 quote 防注入）。
+
+    -P 线程数、-t 时长、-p 端口可自定义；UDP 追加 -u -b（iperf3 的 -b 是**每流**限速，
+    所以 -P 4 -b 100M 等于总目标 400M）；reverse=True 即下行（-R）。
+    """
+    parts = ['iperf3', '-c', shlex.quote(str(host)),
+             '-p', str(cfg['port']), '-t', str(cfg['duration']), '-P', str(cfg['streams'])]
+    if cfg['udp']:
+        parts += ['-u', '-b', cfg['udp_bandwidth']]
+    if reverse:
+        parts.append('-R')
+    return ' '.join(parts)
 
 
 class RunAborted(Exception):
@@ -97,7 +163,8 @@ def proto_name(ip_version):
     return 'IPv6' if int(ip_version or 4) == 6 else 'IPv4'
 
 
-def start_run(target_id, backend_ids, ip_version=4):
+def start_run(target_id, backend_ids, ip_version=4, params=None):
+    cfg = normalize_params(params)
     ip_version = 6 if int(ip_version or 4) == 6 else 4
     proto = proto_name(ip_version)
     with _state_lock:
@@ -124,7 +191,8 @@ def start_run(target_id, backend_ids, ip_version=4):
                 raise RuntimeError(f'后端机器 #{bid} 不存在')
             if m['role'] != 'backend':
                 raise RuntimeError(f'机器「{m["name"]}」的角色不是「后端机器」，不能作为后端参加测试')
-        run_id = db.create_run(target, backend_ids, ip_version, target_host=target_ip)
+        run_id = db.create_run(target, backend_ids, ip_version, target_host=target_ip,
+                               **cfg)
         _active[run_id] = {'stop': False, 'log': []}
     threading.Thread(target=_worker, args=(run_id, target, ip_version), daemon=True).start()
     return run_id
@@ -190,22 +258,30 @@ def _worker(run_id, target, ip_version=4):
         if addr.version != ip_version:
             raise RuntimeError(
                 f'目标机地址 {target_ip} 与所选协议 {proto} 不一致，请重新选择后再试')
-        log(f"=== 测试开始 | 目标机器: {target['name']} ({target_ip}) | 协议: {proto} ===")
+        cfg = run_cfg(run)
+        kind = f"UDP（-b {cfg['udp_bandwidth']}/流）" if cfg['udp'] else 'TCP'
+        log(f"=== 测试开始 | 目标机器: {target['name']} ({target_ip}) | 协议: {proto} | "
+            f"{kind} | -P {cfg['streams']} -t {cfg['duration']} -p {cfg['port']} | "
+            f"ping -c {cfg['ping_count']} ===")
         log('[目标] 通过 Agent 检查/安装 iperf3 与 ping ...')
         code, out = _job(target, aj.SCRIPT_ENSURE, 600, log, stop_check)
         if code != 0:
             raise RuntimeError('目标机 iperf3/ping 安装失败: ' + (out or '').strip()[-300:])
 
-        code, out = _job(target, aj.SCRIPT_START_SERVER, 30, log, stop_check)
+        code, out = _job(target, aj.script_start_server(cfg['port']), 30, log, stop_check)
         if code != 0:
-            raise RuntimeError('目标机 iperf3 -s 启动失败: ' + (out or '').strip()[-300:])
-        log(f'[目标] iperf3 -s 已就绪（端口 5201），开始流水线测试：iperf3 串行 / ping 并行')
+            raise RuntimeError(f"目标机 iperf3 -s 启动失败（端口 {cfg['port']}）: "
+                               + (out or '').strip()[-300:])
+        log(f"[目标] iperf3 -s 已就绪（端口 {cfg['port']}，{'UDP' if cfg['udp'] else 'TCP'}"
+            f"{'，' + str(cfg['streams']) + ' 线程' if cfg['streams'] > 1 else ''}），"
+            f"开始流水线测试：iperf3 串行 / ping 并行")
 
         items = db.get_run_items(run_id)
         lane = Iperf3Lane()
         for idx, it in enumerate(items):
             t = threading.Thread(target=_run_backend,
-                                 args=(lane, st, log, stop_check, target, it, idx, target_ip, proto),
+                                 args=(lane, st, log, stop_check, target, it, idx, target_ip,
+                                       proto, cfg),
                                  daemon=True)
             threads.append(t)
         for t in threads:
@@ -268,11 +344,13 @@ def _worker(run_id, target, ip_version=4):
             _active.pop(run_id, None)
 
 
-def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='IPv4'):
+def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='IPv4', cfg=None):
     """单台后端的流水线：环境检查（并行）→ 等通道 → iperf3 上/下行（串行）→ ping（并行）。
 
-    iperf3 / ping 都用目标地址字面量决定协议族（IPv4 或 IPv6），不再依赖本机默认路由。
+    iperf3 / ping 都用目标地址字面量决定协议族（IPv4 或 IPv6），不再依赖本机默认路由；
+    线程数 / 时长 / 端口 / TCP-UDP 均来自本次测试的参数（cfg）。
     """
+    cfg = cfg or dict(DEFAULT_PARAMS)
     iid = it['id']
     name = it['machine_name']
     db.update_item(iid, status='running', phase='检查环境')
@@ -303,32 +381,36 @@ def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='I
             raise RunAborted()
         lane_passed = True
         try:
-            # 通道内先预检 5201；不通则尝试自动重启目标机 server（串行内重启，无竞争）
-            code, out = _job(m, aj.script_check_port(tq), 15, log, stop_check)
+            # 通道内先预检端口；不通则尝试自动重启目标机 server（串行内重启，无竞争）
+            code, out = _job(m, aj.script_check_port(tq, cfg['port']), 15, log, stop_check)
             if code != 0:
-                log(f'[{name}] 5201 不通，尝试重启目标机 iperf3 server ...')
-                code2, out2 = _job(target, aj.SCRIPT_START_SERVER, 30, log, stop_check)
+                log(f"[{name}] {cfg['port']} 端口不通，尝试重启目标机 iperf3 server ...")
+                code2, out2 = _job(target, aj.script_start_server(cfg['port']), 30, log, stop_check)
                 if code2 != 0:
                     raise RuntimeError('目标机 iperf3 server 启动失败: ' + (out2 or '').strip()[-200:])
-                code, out = _job(m, aj.script_check_port(tq), 15, log, stop_check)
+                code, out = _job(m, aj.script_check_port(tq, cfg['port']), 15, log, stop_check)
                 if code != 0:
-                    extra = '；IPv6 测试需本机与目标机均具备 IPv6 连通性' if proto == 'IPv6' else ''
+                    hints = ''
+                    if proto == 'IPv6':
+                        hints += '；IPv6 测试需本机与目标机均具备 IPv6 连通性'
+                    if cfg['udp']:
+                        hints += f"；UDP 测试需同时放行 {cfg['port']}/UDP"
                     raise RuntimeError(
-                        f'目标机 {tq} 的 5201/TCP 从本机不可达'
-                        f'（请检查目标机防火墙是否放行 5201{extra}）')
+                        f"目标机 {tq} 的 {cfg['port']} 端口从本机不可达"
+                        f"（请检查目标机防火墙/安全组是否放行 {cfg['port']}{hints}）")
 
-            cmd_up = f'iperf3 -c {shlex.quote(tq)} -t 10'
+            cmd_up = build_iperf_cmd(tq, cfg)
             db.update_item(iid, phase='上行测试')
             log(f'[{name}] $ {cmd_up}   （{proto}）')
-            code, up_raw = _job(m, cmd_up, 90, log, stop_check)
+            code, up_raw = _job(m, cmd_up, cfg['duration'] + 60, log, stop_check)
             if code != 0:
                 raise RuntimeError('上行测试失败: ' + (up_raw or '').strip()[-200:])
             time.sleep(1)
 
-            cmd_down = f'iperf3 -c {shlex.quote(tq)} -R -t 10'
+            cmd_down = build_iperf_cmd(tq, cfg, reverse=True)
             db.update_item(iid, phase='下行测试')
             log(f'[{name}] $ {cmd_down}   （{proto}）')
-            code, down_raw = _job(m, cmd_down, 90, log, stop_check)
+            code, down_raw = _job(m, cmd_down, cfg['duration'] + 60, log, stop_check)
             if code != 0:
                 raise RuntimeError('下行测试失败: ' + (down_raw or '').strip()[-200:])
         finally:
@@ -336,10 +418,10 @@ def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='I
         time.sleep(1)
 
         # ping 不占通道，与后续机器的 iperf3 并行
-        cmd_ping = f'ping -c 200 -i 1 {shlex.quote(tq)}'
-        db.update_item(iid, phase='ping 200次（约3分钟）')
-        log(f'[{name}] $ {cmd_ping}  （约需 200 秒，与其它机器的 iperf3 并行）')
-        code, ping_raw = _job(m, cmd_ping, 300, log, stop_check)
+        cmd_ping = f'ping -c {cfg["ping_count"]} -i 1 {shlex.quote(tq)}'
+        db.update_item(iid, phase=f"ping {cfg['ping_count']}次（约{cfg['ping_count']}秒）")
+        log(f"[{name}] $ {cmd_ping}  （约需 {cfg['ping_count']} 秒，与其它机器的 iperf3 并行）")
+        code, ping_raw = _job(m, cmd_ping, cfg['ping_count'] + 120, log, stop_check)
         if 'packets transmitted' not in (ping_raw or ''):
             raise RuntimeError('ping 失败: ' + (ping_raw or '').strip()[-200:])
 
@@ -348,10 +430,14 @@ def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='I
         db.update_item(iid, status='done', phase='完成', ping_raw=ping_raw, up_raw=up_raw,
                        down_raw=down_raw,
                        metrics=json.dumps(metrics, ensure_ascii=False))
+        extra = ''
+        if metrics.get('udp'):
+            extra = (f"| UDP 丢包 {quality.fmt_num(metrics.get('up_udp_loss_pct'), 2)}%/"
+                     f"{quality.fmt_num(metrics.get('down_udp_loss_pct'), 2)}% ")
         log(f"[{name}] ✅ 完成 | 上行 {quality.fmt_num(metrics.get('up_mbits'))} Mbit/s "
             f"| 下行 {quality.fmt_num(metrics.get('down_mbits'))} Mbit/s "
-            f"| 丢包 {quality.fmt_num(metrics.get('loss_pct'))}% "
-            f"| 评价: {metrics.get('rating')}")
+            f"| 丢包 {quality.fmt_num(metrics.get('loss_pct'))}% " + extra
+            + f"| 评价: {metrics.get('rating')}")
     except RunAborted:
         db.update_item(iid, status='failed', error='手动停止')
         log(f'[{name}] ⏹ 已停止')

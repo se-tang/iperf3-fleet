@@ -133,12 +133,28 @@ summary{cursor:pointer;font-weight:600}
       <label class="chk"><input type="checkbox" id="useIpv6"> 🌐 使用 IPv6 测试（需双端均支持 IPv6）</label>
       <span class="muted" id="ipv6Hint" style="font-size:12px"></span>
     </div>
+    <div class="row" style="align-items:flex-end">
+      <div class="field" style="width:92px;margin-bottom:0"><label>线程数 -P</label>
+        <input type="number" id="cfgStreams" value="1" min="1" max="32" step="1"></div>
+      <div class="field" style="width:104px;margin-bottom:0"><label>单向时长 -t</label>
+        <input type="number" id="cfgDuration" value="10" min="1" max="300" step="1"></div>
+      <div class="field" style="width:112px;margin-bottom:0"><label>iperf3 端口 -p</label>
+        <input type="number" id="cfgPort" value="5201" min="1" max="65535" step="1"></div>
+      <div class="field" style="width:110px;margin-bottom:0"><label>ping 次数 -c</label>
+        <input type="number" id="cfgPing" value="200" min="1" max="2000" step="1"></div>
+      <label class="chk" style="margin-bottom:6px"><input type="checkbox" id="cfgUdp"> 📦 UDP 测试 -u</label>
+      <div class="field" style="width:132px;margin-bottom:0"><label>UDP 带宽/流 -b</label>
+        <input id="cfgUdpBw" value="100M" placeholder="100M" disabled></div>
+    </div>
     <div class="row"><button class="primary" data-action="startRun">🚀 开始测试</button></div>
     <p class="hint">
       默认 IPv4：iperf3 与 ping 都使用目标机的 IPv4 地址，两端均为 IPv4（避免个别机器没有 IPv6 导致测试失败）。
       勾选 IPv6 后改用目标机的 IPv6 地址，请先确认所选后端机器都具备 IPv6 连通性。<br>
-      iperf3 全局串行（上/下行各 10 秒），ping 200 次并行；总时长 ≈ 1 分钟 + 台数×25 秒 + 3.5 分钟。
-      目标机需放行 5201/TCP 与 ICMP（开始前自动预检）。
+      参数即 iperf3 原生命令：线程数 <code>-P</code>、单向时长 <code>-t</code>、端口 <code>-p</code>、
+      UDP <code>-u</code> + 每流目标带宽 <code>-b</code>（<code>-b</code> 按流生效，×线程数 = 总目标带宽）；
+      ping 次数 <code>-c</code>（每秒 1 次）。<br>
+      iperf3 全局串行（上/下行各一次）、ping 并行，总时长 ≈ 1 分钟 + 台数 ×（2 × 时长 + 5 秒）。
+      目标机需放行所选端口（UDP 测试还需放行该端口的 UDP）与 ICMP，开始前会自动预检。
     </p>
   </section>
 
@@ -344,7 +360,7 @@ function addrCell(m) {
 
 function updateRoleHint() {
   $('mRoleHint').textContent = $('mRole').value === 'target'
-    ? '⚠️ 改为目标机：测试时运行 iperf3 -s，需放行 5201/TCP 与 ICMP。修改即时生效。'
+    ? '⚠️ 改为目标机：测试时运行 iperf3 -s（端口在「发起测试」里可自定义，默认 5201），需放行该端口与 ICMP。修改即时生效。'
     : '发起测试端。修改即时生效。';
 }
 
@@ -557,15 +573,37 @@ async function startRun() {
   const ip_version = $('useIpv6').disabled ? 4 : ($('useIpv6').checked ? 6 : 4);
   if (!target_id) return alert('请先添加一台角色为「目标」的机器并接入 Agent');
   if (!backend_ids.length) return alert('请至少勾选一台后端机器');
+  // 参数校验（服务端还会再校验一次，这里只为了少跑一趟）
+  const readNum = (id, lo, hi, label) => {
+    const v = parseInt($(id).value, 10);
+    if (!Number.isFinite(v) || v < lo || v > hi) { alert(`${label} 需在 ${lo}–${hi} 之间`); return null; }
+    return v;
+  };
+  const streams = readNum('cfgStreams', 1, 32, '线程数');
+  const duration = readNum('cfgDuration', 1, 300, '单向时长（秒）');
+  const port = readNum('cfgPort', 1, 65535, 'iperf3 端口');
+  const ping_count = readNum('cfgPing', 1, 2000, 'ping 次数');
+  if (streams === null || duration === null || port === null || ping_count === null) return;
+  const udp = $('cfgUdp').checked;
+  const udp_bandwidth = ($('cfgUdpBw').value || '').trim().toUpperCase() || '100M';
+  if (udp && !/^\d{1,5}(\.\d{1,3})?[KMG]$/.test(udp_bandwidth)) {
+    return alert('UDP 目标带宽必须带单位（示例：100M、1G、500K）');
+  }
   const proto = ip_version === 6 ? 'IPv6' : 'IPv4';
   if (ip_version === 6 && !confirm(
       '确认所选后端机器都支持 IPv6？\n\n' +
       'IPv6 测试要求每台后端机器与目标机之间都有 IPv6 连通性，\n' +
       '任一机器没有 IPv6 出口都会导致该台测试失败。\n\n' +
       '继续开始 IPv6 测试？')) return;
-  if (!confirm(`将对目标机器逐台执行：iperf3 上/下行各 10 秒 + ping 200 次（每台约 4 分钟）。\n测试协议：${proto}\n确认开始？`)) return;
+  const params = `${streams} 线程 · 上/下行各 ${duration} 秒 · 端口 ${port} · `
+    + `${udp ? `UDP（-b ${udp_bandwidth}/流，总目标约 ${streams}×）` : 'TCP'} · ping ${ping_count} 次`;
+  const mins = Math.ceil((Math.max(backend_ids.length * (duration * 2 + 5), ping_count) + 30) / 60);
+  if (!confirm(`将对所选后端机器逐台执行：\niperf3 ${params}\n测试协议：${proto}\n`
+      + `iperf3 全局串行、ping 并行，预计总时长约 ${mins} 分钟。\n确认开始？`)) return;
   try {
-    const r = await api('/api/runs', {method: 'POST', body: JSON.stringify({target_id, backend_ids, ip_version})});
+    const r = await api('/api/runs', {method: 'POST', body: JSON.stringify({
+      target_id, backend_ids, ip_version, streams, duration, port, udp, udp_bandwidth, ping_count,
+    })});
     await loadRuns();
     openRun(r.run_id);
   } catch (e) {
@@ -586,7 +624,8 @@ async function loadRuns() {
   tb.innerHTML = runs.map(r => `
     <tr>
       <td>#${r.id}</td>
-      <td>${esc(r.target_name)} <span class="muted">(${esc(r.target_host)} · ${(r.ip_version === 6) ? 'IPv6' : 'IPv4'})</span></td>
+      <td>${esc(r.target_name)} <span class="muted">(${esc(r.target_host)} · ${(r.ip_version === 6) ? 'IPv6' : 'IPv4'} `
+        + `· ${r.udp ? 'UDP' : 'TCP'} ${r.streams}线程/${r.duration}s/${r.port} · ping ${r.ping_count})</span></td>
       <td>${r.done_count}/${r.backend_total} 完成${r.fail_count ? `，${r.fail_count} 失败` : ''}</td>
       <td><span class="badge ${r.status}">${statusText(r.status)}</span></td>
       <td class="muted">${r.created_at}</td>
@@ -626,9 +665,11 @@ async function pollRun() {
   const run = d.run;
   $('runDetailTitle').innerHTML = `测试 #${run.id} <span class="badge ${run.status}">${statusText(run.status)}</span>`;
   $('runDetailMeta').textContent =
-    `目标: ${run.target_name} (${run.target_host}) · 协议: ${run.ip_version === 6 ? 'IPv6' : 'IPv4'}` +
-    ` · 开始: ${run.created_at}` +
-    (run.finished_at ? ` · 结束: ${run.finished_at}` : '');
+    `目标: ${run.target_name} (${run.target_host}) · 协议: ${run.ip_version === 6 ? 'IPv6' : 'IPv4'}`
+    + ` · ${run.udp ? `UDP -b ${run.udp_bandwidth}/流` : 'TCP'} ${run.streams} 线程`
+    + ` · 上/下行各 ${run.duration} 秒 · 端口 ${run.port} · ping ${run.ping_count} 次`
+    + ` · 开始: ${run.created_at}`
+    + (run.finished_at ? ` · 结束: ${run.finished_at}` : '');
   const pre = $('logPre');
   const autoScroll = $('autoScroll') && $('autoScroll').checked;
   const lines = d.log || [];
@@ -859,6 +900,13 @@ $('useIpv6').addEventListener('change', () => {
   if (cb.checked && !confirm('IPv6 测试将使用目标机的 IPv6 地址：\n确认所有选中的后端机器都支持 IPv6？')) {
     cb.checked = false;
   }
+});
+
+$('cfgUdp').addEventListener('change', () => {
+  // 只有 UDP 需要 -b（TCP 无限速）；关掉时保留填写的值，下次勾选还在
+  const on = $('cfgUdp').checked;
+  $('cfgUdpBw').disabled = !on;
+  $('cfgUdpBw').style.opacity = on ? '1' : '.55';
 });
 
 /* ---------------- 初始化 ---------------- */
