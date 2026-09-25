@@ -521,6 +521,7 @@ def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='I
 # ---------------- 地址探测（后台补齐机器的 IPv4 / IPv6） ----------------
 
 DISCOVER_COOLDOWN = 600   # 同一台机器两次自动探测的最小间隔（秒）
+DISCOVER_COOLDOWN_EMPTY = 6 * 3600   # 探测不到任何全局地址（NAT 机）后的退避间隔
 _discover_next = {}       # machine_id -> 下次允许自动探测的时间戳
 
 
@@ -563,6 +564,9 @@ def queue_discovery(mid, force=False):
         try:
             found = discover_machine(mid, force=force)
             print(f'[探测] 机器 #{mid} 地址: {found or "未获取到全局地址"}', flush=True)
+            if not found:
+                # 本机只有私网 / ULA 地址（NAT 机典型情况）：不必每 10 分钟探一次
+                _discover_next[mid] = time.time() + DISCOVER_COOLDOWN_EMPTY
         except Exception as e:
             reason = _probe_fail_reason(e)
             try:
@@ -595,5 +599,9 @@ def discover_machine(mid, force=False):
         db.set_machine_ips(mid, found, force=force)
         db.set_machine_probe(mid, '')
     else:
-        db.set_machine_probe(mid, '这台机器没有全局可路由地址（只有私网 / ULA / 链路本地地址）')
+        # 不是故障：NAT 机的本机地址本来就是私网，测试用的是面板观测到的**出口公网 IP**。
+        # 这条只是说明「本机探测没给出可用的新地址（通常也没有全局 IPv6）」。
+        db.set_machine_probe(
+            mid, '本机探测只有私网 / ULA / 链路本地地址（NAT 机属正常，测试用面板观测到的出口 IP），'
+                 '也没有探测到可用于测试的全局 IPv6')
     return found

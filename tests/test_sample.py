@@ -420,9 +420,15 @@ def test_probe_error_surfaced():
     assert got['ip6'] == '240e:3b0:1234:5678::9', got
     assert got['probe_error'] == '', got
 
-    # 2) 只有私网 / ULA：地址不写，但原因要留在机器上供面板显示
+    # 2) 只有私网 / ULA（NAT 机典型情况）：地址不写，原因留在机器上供面板显示，
+    #    且文案要说清这是正常现象而不是故障
     got = probe_round('IPV4=10.0.0.8\nIPV6=fd00::1\n')
-    assert '全局' in got['probe_error'], got
+    assert 'NAT' in got['probe_error'] and '全局' in got['probe_error'], got
+    # NAT 机不该被每 10 分钟反复探测一次
+    assert runner.DISCOVER_COOLDOWN_EMPTY > runner.DISCOVER_COOLDOWN
+    # 有可用地址时（NAT 机用心跳观测到的出口 IP），资料里仍是可测地址
+    db.touch_machine(m['id'], 'probe', '82.139.236.141')
+    assert db.machine_test_ip(db.get_machine(m['id']), 4) == '82.139.236.141'
 
     # 3) 任务没回传（Agent 拒收/离线）时，提示要能指路
     assert 'agent.log' in runner._probe_fail_reason(TimeoutError('[x] 任务执行超时(20s): r4='))
