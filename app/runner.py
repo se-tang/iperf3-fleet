@@ -144,6 +144,30 @@ def server_ttl(items, cfg):
     return aj.clamp_ttl(lane + _SERVER_PREP_SECONDS + _SERVER_TAIL_SECONDS)
 
 
+# 发行版自带 iperf3 常驻服务（Debian/Ubuntu 装包时问「是否作为守护进程启动」，
+# 默认 No，但有人答过 Yes 就会有）的提示语：它的命令行是 iperf3 --server --interval 0，
+# 不带 -p，且 systemd 单元是 Restart=always —— 面板既杀不掉它，也没法在同端口起自己的 server。
+_DISTRO_DAEMON_HINT = (
+    '检测到发行版自带的 iperf3 常驻服务（systemd 单元 iperf3.service）：它一直监听 5201，'
+    '不受本面板控制，也无法与测试共用端口。处理办法二选一：'
+    '① 在目标机执行 systemctl disable --now iperf3（推荐，顺手关掉这个长期对外开放的端口）后重试；'
+    '② 或在面板里把「目标机端口」改成别的端口（如 5202）绕开它。')
+
+
+def parse_daemon_report(out):
+    """解析 aj.script_check_daemon 的输出 → (发行版服务状态, {端口: 占用该端口的进程行})。
+
+    状态取值 active（正在跑）/ enabled（没跑但开机自启）/ inactive（没跑也没自启）/
+    absent（没有这个服务）/ unknown（体检任务本身没跑成）。
+    """
+    m = re.search(r'^DISTRO_DAEMON=(\w+)$', out or '', re.M)
+    state = m.group(1) if m else 'unknown'
+    busy = {}
+    for pm in re.finditer(r'^PORT_BUSY=(\d+) ?(.*)$', out or '', re.M):
+        busy[int(pm.group(1))] = pm.group(2).strip()
+    return state, busy
+
+
 def build_iperf_cmd(host, cfg, reverse=False):
     """拼 iperf3 客户端命令（host 由调用方保证是合法 IP，仍然 quote 防注入）。
 
@@ -346,6 +370,23 @@ def _worker(run_id, target, ip_version=4):
         tport = target_port_of(cfg)
         ports = serve_ports(items, cfg)
         ttl = server_ttl(items, cfg)
+        # 开测前体检：发行版自带的 iperf3 常驻服务会一直占着 5201（它的命令行不带 -p，
+        # 面板杀不掉也起不来自己的 server），先问清楚，好把提示写进日志和报错里。
+        # 体检只是提示性质，自己失败（超时等）不能拖累整轮测试。
+        try:
+            code, dout = _job(target, aj.script_check_daemon(ports), 15, log, stop_check)
+            daemon_state, busy_ports = (parse_daemon_report(dout) if code == 0
+                                        else ('unknown', {}))
+        except RunAborted:
+            raise
+        except Exception as e:
+            log(f'[目标] 体检脚本未跑成（不影响测试）: {e}')
+            daemon_state, busy_ports = 'unknown', {}
+        if daemon_state in ('active', 'enabled'):
+            log('[目标] ⚠️ ' + _DISTRO_DAEMON_HINT
+                + ('（该服务正在运行）' if daemon_state == 'active' else '（该服务没在跑，但已设为开机自启）'))
+        for p, line in sorted(busy_ports.items()):
+            log(f'[目标] ⚠️ 端口 {p} 已被其它进程占用：{line[:150]}')
         log(f"[目标] 启动 iperf3 server：监听端口 {'、'.join(str(p) for p in ports)}"
             f"（后端机默认连 {tport}）；server 存活上限 {ttl} 秒"
             f"（正常收尾会立即关闭，此值只兜底面板异常）")
@@ -356,8 +397,12 @@ def _worker(run_id, target, ip_version=4):
                 started_ports.append(p)
                 continue
             if required:
-                raise RuntimeError(f'目标机 iperf3 -s 启动失败（端口 {p}）: '
-                                   + (out or '').strip()[-300:])
+                msg = f'目标机 iperf3 -s 启动失败（端口 {p}）: ' + (out or '').strip()[-300:]
+                if p in busy_ports:
+                    msg += f'；该端口已被占用：{busy_ports[p][:150]}'
+                if daemon_state in ('active', 'enabled'):
+                    msg += '；' + _DISTRO_DAEMON_HINT
+                raise RuntimeError(msg)
             # 后端机单独指定的连接端口：起不来只影响那台机器（预检时会给出明确报错）
             log(f"[目标] ⚠️ 端口 {p} 未能在目标机本机监听（可能已被占用）；"
                 f"该端口对应的后端机会在预检时报错")
