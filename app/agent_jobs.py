@@ -55,24 +55,42 @@ else
 fi
 '''.strip()
 
+# iperf3 server 的存活上限（秒）：正常收尾由 script_stop_server 立即关闭，
+# 这个 TTL 只是「面板崩溃 / 任务中断导致关闭指令送不到」时的兜底自过期，
+# 所以按本轮测试的预估串行时长给（见 runner.server_ttl），短测试不再白留半小时。
+SERVER_TTL_DEFAULT = 1800
+SERVER_TTL_MIN = 300
+SERVER_TTL_MAX = 3600
+
+
+def clamp_ttl(seconds, default=SERVER_TTL_DEFAULT):
+    """把 server 存活秒数收敛到 [SERVER_TTL_MIN, SERVER_TTL_MAX]；非法值退回默认值。"""
+    try:
+        t = int(float(seconds))
+    except (TypeError, ValueError):
+        return default
+    return max(SERVER_TTL_MIN, min(SERVER_TTL_MAX, t))
+
+
 # 每轮测试开始：清掉同端口的旧进程后启动 iperf3 -s（也用于通道内掉线自愈重启）
 # 每台后端机可以用各自的端口，所以 pid / 日志按端口分开，清扫也只清同端口，
 # 避免「起第二个端口的 server 时把第一个踢掉」。
-# timeout 1800：server 30 分钟自过期，防止面板崩溃/任务中断后残留进程被扫描器滥用
+# timeout $TTL：server 到点自过期，防止面板崩溃/任务中断后残留进程被扫描器滥用
 # （过期后若有后续测试，通道内端口预检失败会自动重启 server）
-# 端口由用户自定义（默认 5201），模板里用 __PORT__ 占位后替换，避免 format 转义问题
+# 端口由用户自定义（默认 5201），模板里用 __PORT__ / __TTL__ 占位后替换，避免 format 转义问题
 SCRIPT_START_SERVER_TMPL = r'''
 PORT=__PORT__
+TTL=__TTL__
 PIDF="/tmp/iperf3-server-$PORT.pid"
 LOG="/tmp/iperf3-server-$PORT.log"
 [ -f "$PIDF" ] && kill "$(cat "$PIDF")" 2>/dev/null
 command -v pkill >/dev/null 2>&1 && pkill -f "iperf3 -s -p $PORT" 2>/dev/null
 sleep 0.5
-nohup timeout 1800 iperf3 -s -p "$PORT" > "$LOG" 2>&1 &
+nohup timeout "$TTL" iperf3 -s -p "$PORT" > "$LOG" 2>&1 &
 echo $! > "$PIDF"
 sleep 1
 if kill -0 "$(cat "$PIDF")" 2>/dev/null; then
-  echo "SERVER_STARTED port=$PORT"
+  echo "SERVER_STARTED port=$PORT ttl=$TTL"
 else
   echo "SERVER_FAILED port=$PORT"
   cat "$LOG" 2>/dev/null
@@ -81,22 +99,48 @@ fi
 '''.strip()
 
 
-def script_start_server(port=5201):
+def script_start_server(port=5201, ttl=SERVER_TTL_DEFAULT):
     """启动目标机指定端口上的 iperf3 server（TCP/UDP 共用同一个 -s 进程）。
 
     多台后端机可以各用各的端口，因此这里只影响该端口对应的进程。
+    ttl 是该 server 的存活上限（秒）：正常收尾面板会立即下发 script_stop_server
+    关掉它，TTL 只兜底面板崩溃/关闭指令丢失的情况。
     """
-    return SCRIPT_START_SERVER_TMPL.replace('__PORT__', str(valid_port(port)))
+    return (SCRIPT_START_SERVER_TMPL
+            .replace('__PORT__', str(valid_port(port)))
+            .replace('__TTL__', str(clamp_ttl(ttl))))
 
 
-SCRIPT_STOP_SERVER = r'''
+SCRIPT_STOP_SERVER_TMPL = r'''
+PORTS="__PORTS__"
+# 先按 pid 文件精确回收：这些 pid 文件只会由本面板的启动脚本创建，清掉它们不会
+# 影响机器上与本面板无关的 iperf3；再对本次真正用过的端口做一次兜底匹配。
+# 不再使用不带端口的裸 pkill 模式（会误杀用户自己或别的工具起的 iperf3 server）。
 for f in /tmp/iperf3-server*.pid; do
-  [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null
+  [ -e "$f" ] || continue
+  kill "$(cat "$f" 2>/dev/null)" 2>/dev/null
+  rm -f "$f"
 done
-command -v pkill >/dev/null 2>&1 && pkill -f 'iperf3 -s' 2>/dev/null
-rm -f /tmp/iperf3-server*.pid
-echo IPERF3_SERVER_STOPPED
+for p in $PORTS; do
+  command -v pkill >/dev/null 2>&1 && pkill -f "iperf3 -s -p $p" 2>/dev/null
+done
+echo "IPERF3_SERVER_STOPPED ports=$PORTS"
 '''.strip()
+
+
+def script_stop_server(ports=()):
+    """关闭目标机上由本面板启动的 iperf3 server。
+
+    ports 传本轮真正起过的端口（见 runner._worker 的 started_ports）：pid 文件清扫
+    覆盖全部端口，逐端口匹配只针对这些端口，从而避免误杀无关的 iperf3 进程。
+    """
+    ps = []
+    for p in ports or ():
+        v = valid_port(p, None)
+        if v is not None and v not in ps:
+            ps.append(v)
+    return SCRIPT_STOP_SERVER_TMPL.replace(
+        '__PORTS__', ' '.join(str(p) for p in sorted(ps)))
 
 
 def script_check_port(ip, port=5201):

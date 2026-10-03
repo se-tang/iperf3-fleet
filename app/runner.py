@@ -125,6 +125,25 @@ def serve_ports(items, cfg):
     return sorted(ports)
 
 
+# iperf3 server 存活上限：正常收尾由 _worker 的 finally 立即关闭，TTL 只兜底
+# 「面板崩溃 / 关闭指令送不到」的情况，所以按本轮预估串行时长给，短测试不再白留半小时。
+_SERVER_PREP_SECONDS = 120   # 环境检查、起 server、机器之间切换等固定开销
+_SERVER_TAIL_SECONDS = 300   # 余量：任务派发与心跳往返、最后一台的收尾
+
+
+def server_ttl(items, cfg):
+    """本轮目标机 iperf3 server 的兜底存活上限（秒）。
+
+    iperf3 全局串行，所以关键路径 ≈ 台数 ×（上行 + 下行 + 切换）；ping 与后续机器的
+    iperf3 并行，最后一台的 ping 落在 server 不再被需要之后，因此不计入关键路径。
+    结果经 aj.clamp_ttl 收敛到 [300s, 3600s]：台数 × 时长很大时会被压到上限，
+    剩下的靠通道内端口预检自愈重启续期（见 _run_backend）。
+    """
+    n = max(1, len(items or []))
+    lane = n * (2 * int(cfg['duration']) + 10)
+    return aj.clamp_ttl(lane + _SERVER_PREP_SECONDS + _SERVER_TAIL_SECONDS)
+
+
 def build_iperf_cmd(host, cfg, reverse=False):
     """拼 iperf3 客户端命令（host 由调用方保证是合法 IP，仍然 quote 防注入）。
 
@@ -295,6 +314,8 @@ def _worker(run_id, target, ip_version=4):
 
     lane = None
     threads = []
+    started_ports = []           # 本轮真正在目标机起起来的 server 端口（收尾必须全部关掉）
+    ttl = aj.SERVER_TTL_DEFAULT  # 下面按本轮参数覆盖
     status = 'finished'
     error = ''
     proto = proto_name(ip_version)
@@ -324,18 +345,22 @@ def _worker(run_id, target, ip_version=4):
         # 目标机端口（NAT 同号映射时就是商家映射的那个端口）+ 各机单独指定的连接端口
         tport = target_port_of(cfg)
         ports = serve_ports(items, cfg)
+        ttl = server_ttl(items, cfg)
         log(f"[目标] 启动 iperf3 server：监听端口 {'、'.join(str(p) for p in ports)}"
-            f"（后端机默认连 {tport}）")
+            f"（后端机默认连 {tport}）；server 存活上限 {ttl} 秒"
+            f"（正常收尾会立即关闭，此值只兜底面板异常）")
         for p in ports:
             required = (p == tport)
-            code, out = _job(target, aj.script_start_server(p), 30, log, stop_check)
-            if code != 0:
-                if required:
-                    raise RuntimeError(f'目标机 iperf3 -s 启动失败（端口 {p}）: '
-                                       + (out or '').strip()[-300:])
-                # 后端机单独指定的连接端口：起不来只影响那台机器（预检时会给出明确报错）
-                log(f"[目标] ⚠️ 端口 {p} 未能在目标机本机监听（可能已被占用）；"
-                    f"该端口对应的后端机会在预检时报错")
+            code, out = _job(target, aj.script_start_server(p, ttl), 30, log, stop_check)
+            if code == 0:
+                started_ports.append(p)
+                continue
+            if required:
+                raise RuntimeError(f'目标机 iperf3 -s 启动失败（端口 {p}）: '
+                                   + (out or '').strip()[-300:])
+            # 后端机单独指定的连接端口：起不来只影响那台机器（预检时会给出明确报错）
+            log(f"[目标] ⚠️ 端口 {p} 未能在目标机本机监听（可能已被占用）；"
+                f"该端口对应的后端机会在预检时报错")
 
         log(f"[目标] iperf3 -s 已就绪（端口 {tport}，{'UDP' if cfg['udp'] else 'TCP'}"
             f"{'，' + str(cfg['streams']) + ' 线程' if cfg['streams'] > 1 else ''}），"
@@ -345,7 +370,7 @@ def _worker(run_id, target, ip_version=4):
         for idx, it in enumerate(items):
             t = threading.Thread(target=_run_backend,
                                  args=(lane, st, log, stop_check, target, it, idx, target_ip,
-                                       proto, cfg),
+                                       proto, cfg, ttl),
                                  daemon=True)
             threads.append(t)
         for t in threads:
@@ -353,11 +378,6 @@ def _worker(run_id, target, ip_version=4):
         for t in threads:
             t.join()
 
-        log('=== 全部后端测试结束，正在关闭目标机 iperf3 server ===')
-        try:
-            _job(target, aj.SCRIPT_STOP_SERVER, 15, log, None)
-        except Exception:
-            pass
     except RunAborted:
         status = 'stopped'
         error = '用户手动停止测试'
@@ -382,6 +402,17 @@ def _worker(run_id, target, ip_version=4):
             lane.stop()
         for t in threads:
             t.join(timeout=15)
+
+        # 任何退出路径（正常结束 / 手动停止 / 异常中断）都必须关掉目标机的 iperf3 server，
+        # 否则端口会一直开到 TTL 到点，期间可能被扫描到并盗刷流量。
+        if started_ports:
+            log('=== 正在关闭目标机 iperf3 server（端口 '
+                + '、'.join(str(p) for p in started_ports) + '）===')
+            try:
+                _job(target, aj.script_stop_server(started_ports), 15, log, None)
+            except Exception as e:
+                log(f'[目标] ⚠️ 关闭 iperf3 server 失败（{e}）；'
+                    f'残留进程会在 {ttl} 秒存活上限到点后自动退出')
 
         run = db.get_run(run_id)
         items = db.get_run_items(run_id)
@@ -408,11 +439,13 @@ def _worker(run_id, target, ip_version=4):
             _active.pop(run_id, None)
 
 
-def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='IPv4', cfg=None):
+def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='IPv4', cfg=None,
+                 ttl=aj.SERVER_TTL_DEFAULT):
     """单台后端的流水线：环境检查（并行）→ 等通道 → iperf3 上/下行（串行）→ ping（并行）。
 
     iperf3 / ping 都用目标地址字面量决定协议族（IPv4 或 IPv6），不再依赖本机默认路由；
-    线程数 / 时长 / 端口 / TCP-UDP 均来自本次测试的参数（cfg）。
+    线程数 / 时长 / 端口 / TCP-UDP 均来自本次测试的参数（cfg）；ttl 用于目标机 server
+    掉线自愈重启时沿用同一个存活上限。
     """
     cfg = cfg or dict(DEFAULT_PARAMS)
     iid = it['id']
@@ -452,7 +485,8 @@ def _run_backend(lane, st, log, stop_check, target, it, idx, target_ip, proto='I
             code, out = _job(m, aj.script_check_port(tq, my_port), 15, log, stop_check)
             if code != 0:
                 log(f"[{name}] {my_port} 端口不通，尝试重启目标机 iperf3 server ...")
-                code2, out2 = _job(target, aj.script_start_server(my_port), 30, log, stop_check)
+                code2, out2 = _job(target, aj.script_start_server(my_port, ttl), 30,
+                                   log, stop_check)
                 if code2 != 0:
                     raise RuntimeError('目标机 iperf3 server 启动失败: ' + (out2 or '').strip()[-200:])
                 code, out = _job(m, aj.script_check_port(tq, my_port), 15, log, stop_check)

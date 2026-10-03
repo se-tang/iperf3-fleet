@@ -476,8 +476,13 @@ def test_test_params():
     assert '5201' not in srv, srv
     assert 'iperf3 -s -p $PORT' in srv, srv                 # 只清同端口残留
     assert "pkill -f 'iperf3 -s'" not in srv, srv           # 不能无差别清杀
+    assert 'timeout "$TTL" iperf3 -s -p "$PORT"' in srv, srv  # 存活上限随 TTL 走
+    stop = aj.script_stop_server([6500])
+    assert 'PORTS="6500"' in stop, stop
+    assert '/tmp/iperf3-server*.pid' in stop, stop           # 收尾时按 pid 文件全部停掉
+    assert 'pkill -f "iperf3 -s -p $p"' in stop, stop       # 兜底匹配只针对用过的端口
+    assert "pkill -f 'iperf3 -s'" not in stop, stop          # 不能无差别清杀
     assert 'port="6500"' in aj.script_check_port('1.2.3.4', 6500)
-    assert '/tmp/iperf3-server*.pid' in aj.SCRIPT_STOP_SERVER   # 收尾时全部停掉
     assert aj.valid_port(0) == 5201 and aj.valid_port(70000) == 5201
     assert aj.valid_port('abc') == 5201 and aj.valid_port('6500') == 6500
 
@@ -677,6 +682,118 @@ def test_machine_addr_override():
     print('手动测试地址 OK')
 
 
+def test_server_lifecycle():
+    """iperf3 server 生命周期：存活上限按本轮时长收敛 + 任何退出路径都关闭。
+
+    背景：iperf3 是裸 -s（无认证、无来源限制），端口只要还在监听就可能被扫描到并
+    盗刷流量，所以「什么时候关」必须被测试固定住。
+    """
+    import inspect
+    import shutil
+    import subprocess
+    import time
+    from app import agent_jobs as aj
+    from app import runner
+
+    # 1) TTL 收敛：正常值原样、越界夹紧、非法值退回默认
+    assert aj.clamp_ttl(600) == 600
+    assert aj.clamp_ttl(1) == aj.SERVER_TTL_MIN == 300
+    assert aj.clamp_ttl(10 ** 9) == aj.SERVER_TTL_MAX == 3600
+    assert aj.clamp_ttl('abc') == aj.SERVER_TTL_DEFAULT == 1800
+    assert aj.clamp_ttl('900') == 900 and aj.clamp_ttl(900.7) == 900
+
+    # 2) TTL 真的写进启动脚本
+    assert 'TTL=300' in aj.script_start_server(5201, 1)
+    assert 'TTL=1800' in aj.script_start_server(5201)            # 不传就用默认
+    assert 'timeout "$TTL"' in aj.script_start_server(5201, 3600)
+
+    # 3) 关闭脚本：去重排序、丢弃非法端口，且没有无差别的裸 pkill
+    stop = aj.script_stop_server([6002, 5201, 5201, 0, 'x'])
+    assert 'PORTS="5201 6002"' in stop, stop
+    assert 'pkill -f "iperf3 -s -p $p"' in stop, stop
+    assert "pkill -f 'iperf3 -s'" not in stop, stop
+
+    # 4) 预估 TTL = iperf3 串行关键路径 + 余量：短测试不再白留 30 分钟，
+    #    而 3 台 × 300 秒这种长测（旧代码固定 1800 会在中途过期打断测试）要够用
+    cfg10 = runner.normalize_params({'duration': 10})
+    one = runner.server_ttl([{'id': 1}], cfg10)
+    assert one == 2 * 10 + 10 + 120 + 300 == 450, one
+    t2 = runner.server_ttl([{'id': 1}, {'id': 2}], cfg10)
+    assert one < t2 <= aj.SERVER_TTL_MAX, (one, t2)
+    long3 = runner.server_ttl([{'id': i} for i in range(1, 4)],
+                              runner.normalize_params({'duration': 300}))
+    assert long3 == 3 * 610 + 120 + 300 == 2250, long3           # 不再中途过期
+    many = runner.server_ttl([{'id': i} for i in range(1, 33)],
+                             runner.normalize_params({'duration': 300}))
+    assert many == aj.SERVER_TTL_MAX == 3600, many               # 超长测封顶，靠预检自愈续期
+
+    # 5) 回归护栏：关闭动作必须在 _worker 的 finally 里（正常结束 / 手动停止 / 异常
+    #    都要收尾），而不是只在成功路径上关一次
+    src = inspect.getsource(runner._worker)
+    assert len(src.split('finally:')) == 2, src
+    assert 'script_stop_server' in src.split('finally:', 1)[1], src
+    assert 'started_ports' in src, src
+
+    # 6) 真执行（仅 Linux + bash）：用假 iperf3 验证「启动 → 关闭」和 TTL 自过期兜底
+    if sys.platform != 'linux' or not shutil.which('bash') or not shutil.which('timeout'):
+        print('跳过 server 脚本真执行用例（仅 Linux + bash/coreutils 环境执行）')
+        print('iperf3 server 生命周期（TTL / 收尾关闭）OK')
+        return
+
+    tmp = tempfile.mkdtemp(prefix='iperf3-fleet-srv-')
+    bind = os.path.join(tmp, 'bin')
+    os.makedirs(bind)
+    with open(os.path.join(bind, 'iperf3'), 'w', encoding='utf-8') as f:
+        f.write('#!/bin/sh\nexec sleep 300\n')          # 假 iperf3：exec 后 PID 就是它
+    os.chmod(os.path.join(bind, 'iperf3'), 0o755)
+    env = dict(os.environ, PATH=bind + os.pathsep + os.environ.get('PATH', ''))
+
+    def alive(pid):
+        """进程是否真的活着（僵尸不算：容器里 PID 1 可能不回收子进程）。"""
+        try:
+            with open(f'/proc/{int(pid)}/stat', encoding='utf-8') as fp:
+                return fp.read().rsplit(')', 1)[1].split()[0] != 'Z'
+        except (OSError, ValueError, IndexError):
+            return False
+
+    def run(script):
+        return subprocess.run(['bash', '-c', script], capture_output=True, text=True, env=env)
+
+    stop_port, ttl_port = 65011, 65012
+    pidf = f'/tmp/iperf3-server-{stop_port}.pid'
+    pidf_ttl = f'/tmp/iperf3-server-{ttl_port}.pid'
+    try:
+        r = run(aj.script_start_server(stop_port, 600))
+        assert f'SERVER_STARTED port={stop_port} ttl=600' in r.stdout, (r.stdout, r.stderr)
+        pid = open(pidf, encoding='utf-8').read().strip()
+        assert alive(pid), '假 iperf3 没起来'
+
+        r = run(aj.script_stop_server([stop_port]))
+        assert f'IPERF3_SERVER_STOPPED ports={stop_port}' in r.stdout, r.stdout
+        time.sleep(0.5)
+        assert not alive(pid), '关闭脚本没有真的杀掉 server'
+        assert not os.path.exists(pidf), '关闭后 pid 文件没清理'
+
+        # TTL 兜底：绕过 clamp 直接写 2 秒，模拟「面板崩了、关闭指令送不到」
+        short = (aj.SCRIPT_START_SERVER_TMPL
+                 .replace('__PORT__', str(ttl_port)).replace('__TTL__', '2'))
+        r = run(short)
+        assert 'SERVER_STARTED' in r.stdout, (r.stdout, r.stderr)
+        pid_ttl = open(pidf_ttl, encoding='utf-8').read().strip()
+        assert alive(pid_ttl), '假 iperf3 没起来（TTL 用例）'
+        time.sleep(3.5)
+        assert not alive(pid_ttl), 'TTL 到点后 server 没有自过期（端口会一直开着）'
+    finally:
+        for f in (pidf, pidf_ttl):
+            if os.path.exists(f):
+                try:
+                    os.kill(int(open(f, encoding='utf-8').read().strip()), 9)
+                except (OSError, ValueError):
+                    pass
+                os.remove(f)
+    print('iperf3 server 生命周期（TTL / 收尾关闭 / 脚本真执行）OK')
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
@@ -692,4 +809,5 @@ if __name__ == '__main__':
     test_multistream_and_udp_parse()
     test_report_params_and_udp_columns()
     test_machine_addr_override()
+    test_server_lifecycle()
     print('\nALL TESTS PASSED')
