@@ -45,7 +45,11 @@ if [ "$ok" = "0" ] && have apk; then
   apk add --no-cache iperf3 >/dev/null 2>&1 && ok=1
 fi
 if [ "$ok" = "0" ] && have zypper; then
-  zypper --non-interactive install iperf3 >/dev/null 2>&1 && ok=1
+  # openSUSE 的包名是 iperf（包里的二进制才叫 iperf3，Provides 里没有 iperf3），
+  # 所以先按 iperf3 试，装不上再回退到 iperf，否则这个分支在 openSUSE 上永远失败
+  zypper --non-interactive install iperf3 >/dev/null 2>&1 \
+    || zypper --non-interactive install iperf >/dev/null 2>&1
+  have iperf3 && ok=1
 fi
 if have iperf3; then
   echo "[setup] iperf3 安装成功: $(iperf3 --version 2>&1 | head -n1)"
@@ -140,6 +144,54 @@ def script_stop_server(ports=()):
         if v is not None and v not in ps:
             ps.append(v)
     return SCRIPT_STOP_SERVER_TMPL.replace(
+        '__PORTS__', ' '.join(str(p) for p in sorted(ps)))
+
+
+# 开测前的体检：找出发行版自带的 iperf3 常驻服务、以及本次要用的端口是否已被别人监听。
+# 背景：Debian / Ubuntu 的 iperf3 包在装的时候会问「是否作为守护进程启动」（默认 No），
+# 但只要有人答过 Yes，这台机器就会有一个 systemd 常驻服务一直监听 5201：它的命令行是
+# `iperf3 --server --interval 0`（不带 -p），而且 Restart=always —— 面板既杀不掉它，
+# 也别想在同端口起自己的 server。所以这里提前把情况问清楚，好给出能直接照做的提示。
+SCRIPT_CHECK_DAEMON_TMPL = r'''
+PORTS="__PORTS__"
+have() { command -v "$1" >/dev/null 2>&1; }
+
+state=absent
+if have systemctl; then
+  if systemctl is-active --quiet iperf3 2>/dev/null; then
+    state=active
+  elif systemctl is-enabled --quiet iperf3 2>/dev/null; then
+    state=enabled            # 当前没跑，但开机自启，重启后会占住端口
+  else
+    state=inactive
+  fi
+fi
+echo "DISTRO_DAEMON=$state"
+
+# 本次要用的端口是否已有人在监听；有本面板 pid 文件的说明是我们自己上一轮残留的，
+# 启动脚本会先把它换掉，所以不算冲突，跳过以免误报。
+for p in $PORTS; do
+  [ -f "/tmp/iperf3-server-$p.pid" ] && continue
+  line=""
+  if have ss; then
+    line=$(ss -ltnp 2>/dev/null | grep -E "[:.]$p[[:space:]]" | head -n1)
+  elif have netstat; then
+    line=$(netstat -ltnp 2>/dev/null | grep -E "[:.]$p[[:space:]]" | head -n1)
+  fi
+  [ -n "$line" ] && echo "PORT_BUSY=$p $line"
+done
+echo "DAEMON_CHECK_DONE"
+'''.strip()
+
+
+def script_check_daemon(ports=()):
+    """生成开测前体检脚本：发行版 iperf3 常驻服务状态 + 本次端口是否被占用。"""
+    ps = []
+    for p in ports or ():
+        v = valid_port(p, None)
+        if v is not None and v not in ps:
+            ps.append(v)
+    return SCRIPT_CHECK_DAEMON_TMPL.replace(
         '__PORTS__', ' '.join(str(p) for p in sorted(ps)))
 
 

@@ -794,6 +794,45 @@ def test_server_lifecycle():
     print('iperf3 server 生命周期（TTL / 收尾关闭 / 脚本真执行）OK')
 
 
+def test_daemon_guard():
+    """发行版自带 iperf3 常驻服务的体检：探测脚本、解析、提示语、apt 不弹窗的保证。"""
+    from app import agent_jobs as aj
+    from app import runner
+
+    # 1) 体检脚本：查 systemd 单元状态 + 本次端口占用，并跳过本面板自己残留的 server
+    chk = aj.script_check_daemon([6500, 5201, 5201, 0])
+    assert 'PORTS="5201 6500"' in chk, chk                 # 去重 + 排序 + 丢掉非法端口
+    assert 'systemctl is-active --quiet iperf3' in chk, chk
+    assert 'systemctl is-enabled --quiet iperf3' in chk, chk   # 没跑但开机自启也要报
+    assert 'DISTRO_DAEMON=$state' in chk and 'PORT_BUSY=$p $line' in chk, chk
+    assert '/tmp/iperf3-server-$p.pid' in chk, chk          # 自己上一轮残留的不算冲突
+    assert 'ss -ltnp' in chk and 'netstat -ltnp' in chk, chk
+
+    # 2) 解析：几种状态 / 端口占用 / 任务没跑成（只提示，不误判为故障）
+    state, busy = runner.parse_daemon_report(
+        'DISTRO_DAEMON=active\n'
+        'PORT_BUSY=5201 LISTEN 0 128 0.0.0.0:5201 0.0.0.0:* users:(("iperf3",pid=812,fd=3))\n'
+        'DAEMON_CHECK_DONE\n')
+    assert state == 'active' and 5201 in busy and 'iperf3' in busy[5201], (state, busy)
+    assert runner.parse_daemon_report('DISTRO_DAEMON=enabled\n') == ('enabled', {})
+    assert runner.parse_daemon_report('') == ('unknown', {})
+    assert runner.parse_daemon_report(None) == ('unknown', {})
+
+    # 3) 提示语要给出能直接照做的办法（面板用户不一定懂 shell）
+    assert 'systemctl disable --now iperf3' in runner._DISTRO_DAEMON_HINT
+    assert '目标机端口' in runner._DISTRO_DAEMON_HINT
+
+    # 4) 装包时不会弹「是否作为守护进程启动」：非交互 + -y，debconf 取默认值 No
+    #    （Debian/Ubuntu 的 iperf3 模板 iperf3/start_daemon 默认 false）
+    assert 'export DEBIAN_FRONTEND=noninteractive' in aj.SCRIPT_ENSURE, aj.SCRIPT_ENSURE
+    assert 'apt-get install -y iperf3' in aj.SCRIPT_ENSURE, aj.SCRIPT_ENSURE
+
+    # 5) openSUSE 的包名是 iperf（提供的二进制才叫 iperf3），必须能回退
+    assert 'zypper --non-interactive install iperf3' in aj.SCRIPT_ENSURE, aj.SCRIPT_ENSURE
+    assert 'zypper --non-interactive install iperf' in aj.SCRIPT_ENSURE, aj.SCRIPT_ENSURE
+    print('发行版 iperf3 守护进程体检 / apt 非交互安装 OK')
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
@@ -810,4 +849,5 @@ if __name__ == '__main__':
     test_report_params_and_udp_columns()
     test_machine_addr_override()
     test_server_lifecycle()
+    test_daemon_guard()
     print('\nALL TESTS PASSED')
