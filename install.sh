@@ -51,6 +51,14 @@ else
   C_BLUE=""; C_CYAN=""; C_MAGENTA=""
 fi
 
+# 交互终端才做动画：重定向 / 日志抓取（`| tee`、CI）下只打静态行，
+# 免得输出里塞满 \r 刷新帧和 ANSI 转义
+if [ -t 1 ] && [ -z "${IPERF3_FLEET_PLAIN:-}" ]; then
+  FANCY=1
+else
+  FANCY=0
+fi
+
 SPIN_PID=""
 _cleanup() {
   [ -n "$SPIN_PID" ] && kill "$SPIN_PID" 2>/dev/null
@@ -141,15 +149,19 @@ run_spinner() {
   _t0="$(date +%s 2>/dev/null || echo 0)"
   while kill -0 "$_job" 2>/dev/null; do
     _i=$(( (_i + 1) % 4 ))
-    _ch="$(printf '%s' "$_frames" | cut -c$((_i + 1)))"
-    _el=$(( $(date +%s 2>/dev/null || echo 0) - _t0 ))
-    printf '\r  %s%s%s %s ... %s%ss%s\033[K' \
-      "$C_CYAN" "$_ch" "$C_RESET" "$_label" "$C_DIM" "$_el" "$C_RESET"
+    if [ "$FANCY" = "1" ]; then
+      _ch="$(printf '%s' "$_frames" | cut -c$((_i + 1)))"
+      _el=$(( $(date +%s 2>/dev/null || echo 0) - _t0 ))
+      printf '\r  %s%s%s %s ... %s%ss%s\033[K' \
+        "$C_CYAN" "$_ch" "$C_RESET" "$_label" "$C_DIM" "$_el" "$C_RESET"
+    elif [ "$_i" = "1" ]; then
+      printf '  %s▸%s %s ...\n' "$C_CYAN" "$C_RESET" "$_label"
+    fi
     sleep 1
   done
   wait "$_job"
   _rc=$?
-  printf '\r\033[K'
+  [ "$FANCY" = "1" ] && printf '\r\033[K'
   if [ "$_rc" = "0" ]; then
     printf '  %s▸%s %s ... %sdone%s %s(%ss)%s\n' "$C_CYAN" "$C_RESET" "$_label" \
       "$C_GREEN" "$C_RESET" "$C_DIM" \
@@ -570,12 +582,16 @@ while [ "$_i" -lt 90 ]; do
     case "$_st" in exited | dead) break ;; esac
   fi
   _i=$((_i + 1))
-  _ch="$(printf '/-\|' | cut -c$(( (_i % 4) + 1 )))"
-  printf '\r  %s%s%s 健康检查 ... %s%ss%s\033[K' "$C_CYAN" "$_ch" "$C_RESET" "$C_DIM" \
-    "$(( $(date +%s 2>/dev/null || echo 0) - _t0 ))" "$C_RESET"
+  if [ "$FANCY" = "1" ]; then
+    _ch="$(printf '/-\|' | cut -c$(( (_i % 4) + 1 )))"
+    printf '\r  %s%s%s 健康检查 ... %s%ss%s\033[K' "$C_CYAN" "$_ch" "$C_RESET" "$C_DIM" \
+      "$(( $(date +%s 2>/dev/null || echo 0) - _t0 ))" "$C_RESET"
+  elif [ "$_i" = "1" ]; then
+    printf '    %s等待容器健康检查（最长约 3 分钟）…%s\n' "$C_DIM" "$C_RESET"
+  fi
   sleep 2
 done
-printf '\r\033[K'
+[ "$FANCY" = "1" ] && printf '\r\033[K'
 
 if [ "$HEALTHY" != "1" ]; then
   warn "面板健康检查未通过，下面是容器日志："
