@@ -63,7 +63,9 @@ SPIN_PID=""
 _cleanup() {
   [ -n "$SPIN_PID" ] && kill "$SPIN_PID" 2>/dev/null
   SPIN_PID=""
-  printf '\r\033[K' 2>/dev/null || true
+  # 非交互下不写控制字符：抓日志的人不会看到行尾的转义
+  [ "${FANCY:-0}" = "1" ] && printf '\r\033[K' 2>/dev/null
+  return 0
 }
 trap _cleanup EXIT INT TERM
 
