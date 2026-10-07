@@ -12,10 +12,11 @@
 
 要点：
 
-- **可重复执行**：再次运行等于升级（`git pull` + 重新构建），数据、端口、机器接入关系全部保留；之前用过 HTTPS 会自动带上 `--profile tls`，不会把 caddy 弄丢，并顺手清理被误挂载成目录的 `Caddyfile.local`。
+- **安装输出是给人看的**：每一步一行（`▸ 步骤 ... 结果 (耗时)`），耗时的第三方命令（装 Docker、构建镜像）只显示 spinner + 已用秒数，它们的刷屏输出全部写进日志文件（默认 `/tmp/iperf3-fleet-install.log`，可用 `IPERF3_FLEET_LOG` 改）。失败时自动回显日志末尾 6–10 行，不必再翻屏找原因；想看到全部原始输出就加 `IPERF3_FLEET_VERBOSE=1`。管道 / CI 环境下自动退化为纯文本（无颜色、无 spinner 刷新）。
+- **可重复执行**：再次运行等于升级（`git pull` + 重新构建），数据、端口、机器接入关系全部保留；之前用过 HTTPS 会自动带上 `--profile tls`，不会把 caddy 弄丢，并顺手清理被误挂载成目录的 `Caddyfile.local`。升级时不会重复显示初始密码（避免误导）。
 - **非 root 也能跑**：会通过 `sudo` 提权（需要机器上有 sudo）。
 - 国内装 Docker 慢/超时：命令改成 `... | DOCKER_MIRROR=Aliyun bash`；机器走代理：命令最前面加 `https_proxy=http://IP:端口`。
-- 环境变量：`IPERF3_FLEET_DIR`（安装目录，默认 `~/iperf3-fleet`）、`IPERF3_FLEET_REPO_URL`、`IPERF3_FLEET_BRANCH`、`IPERF3_FLEET_TLS=1`（同时启用 HTTPS 网关）、`DOCKER_MIRROR`、`COMPOSE_MIRROR`、`IPERF3_FLEET_TARBALL`。
+- 环境变量：`IPERF3_FLEET_DIR`（安装目录，默认 `~/iperf3-fleet`）、`IPERF3_FLEET_REPO_URL`、`IPERF3_FLEET_BRANCH`、`IPERF3_FLEET_TLS=1`（同时启用 HTTPS 网关）、`IPERF3_FLEET_VERBOSE=1`、`IPERF3_FLEET_LOG`、`NO_COLOR=1`、`DOCKER_MIRROR`、`COMPOSE_MIRROR`、`IPERF3_FLEET_TARBALL`。
 - 脚本需要 `bash`（Alpine 等默认 ash 的系统先 `apk add bash`）；机器上连 `curl` 都没有时先 `apt-get update && apt-get install -y curl`（或 `yum install -y curl` / `apk add curl`）。
 - 端口随机生成（记录在 `.env`，升级/重启不变），登录账号密码随机生成，均在部署横幅里显示一次；忘记密码删 `data/auth.json` 重启重新生成。
 - 面板容器默认只读文件系统 + 最小权限运行。

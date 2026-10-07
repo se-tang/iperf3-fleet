@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS runs (
     udp INTEGER NOT NULL DEFAULT 0,
     udp_bandwidth TEXT NOT NULL DEFAULT '100M',
     ping_count INTEGER NOT NULL DEFAULT 200,
+    source TEXT NOT NULL DEFAULT 'manual',
+    schedule_id INTEGER,
     status TEXT NOT NULL DEFAULT 'running',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     finished_at TEXT,
@@ -111,6 +113,41 @@ CREATE TABLE IF NOT EXISTS agent_tombstones (
     cmd_b64 TEXT NOT NULL DEFAULT '',
     sig TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    target_id INTEGER NOT NULL,
+    backend_ids TEXT NOT NULL DEFAULT '[]',
+    ip_version INTEGER NOT NULL DEFAULT 4,
+    streams INTEGER NOT NULL DEFAULT 1,
+    duration INTEGER NOT NULL DEFAULT 10,
+    port INTEGER NOT NULL DEFAULT 5201,
+    udp INTEGER NOT NULL DEFAULT 0,
+    udp_bandwidth TEXT NOT NULL DEFAULT '100M',
+    ping_count INTEGER NOT NULL DEFAULT 200,
+    ports TEXT NOT NULL DEFAULT '{}',
+    interval_seconds INTEGER NOT NULL DEFAULT 3600,
+    on_busy TEXT NOT NULL DEFAULT 'skip',
+    last_run_at TEXT,
+    last_run_id INTEGER,
+    last_status TEXT NOT NULL DEFAULT '',
+    next_run_at TEXT,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    skip_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS schedule_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id INTEGER NOT NULL,
+    run_id INTEGER,
+    planned_at TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    status TEXT NOT NULL DEFAULT 'running',
+    note TEXT NOT NULL DEFAULT ''
 );
 '''
 
@@ -165,6 +202,11 @@ def init_db():
     # 旧库残留的 runs.target_port 列不再读取。
     for row in db.execute("SELECT id FROM machines WHERE sign_key=''").fetchall():
         db.execute('UPDATE machines SET sign_key=? WHERE id=?', (secrets.token_hex(32), row['id']))
+    # v2.9：测试记录来源（手动 / 定时任务），供记录列表与对比报告区分
+    if cols_r and 'source' not in cols_r:
+        db.execute("ALTER TABLE runs ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+    if cols_r and 'schedule_id' not in cols_r:
+        db.execute('ALTER TABLE runs ADD COLUMN schedule_id INTEGER')
     cols_tb = [r['name'] for r in db.execute('PRAGMA table_info(agent_tombstones)').fetchall()]
     if cols_tb and 'cmd_b64' not in cols_tb:
         # 墓碑是一次性瞬态数据，结构变化直接重建
@@ -185,6 +227,14 @@ def mark_stale_runs():
         "UPDATE jobs SET status='failed', exit_code=-1, output = output || ?, "
         "finished_at=datetime('now','localtime') WHERE status IN ('queued','running')",
         ('\n[面板] 面板重启，任务作废\n',))
+    # 定时任务：把「中断」的那一轮标清楚，但**不动下次执行时间**——
+    # 定时任务本身是长期挂着的，面板重启不该让它停掉，恢复后继续按原计划跑。
+    db.execute(
+        "UPDATE schedule_runs SET status='interrupted', note='面板服务重启导致中断' "
+        "WHERE status='running'")
+    db.execute(
+        "UPDATE schedules SET last_status='interrupted', "
+        "last_error='面板服务重启导致本轮中断' WHERE last_status='running'")
     db.commit()
 
 
@@ -481,12 +531,14 @@ def _port_or_follow(v):
     return p if 1 <= p <= 65535 else 0
 
 
-def create_run(target, backend_ids, ip_version=4, target_host='', **params):
+def create_run(target, backend_ids, ip_version=4, target_host='', source='manual',
+               schedule_id=None, **params):
     """新建一次测试记录；params 为本次测试参数（线程/时长/端口/协议/ping 次数）。
 
     params['port'] 是**目标机端口**：目标机 iperf3 -s 监听它，后端机默认也连它
     （NAT 商家的端口映射一般是同号映射，改这一个值即可）。
     params['ports'] 可选，{机器ID: 端口}：个别后端机单独走不同连接端口的场景。
+    source / schedule_id 标记这次测试的来源（手动 or 某个定时任务）。
     """
     db = get_db()
     ip_version = 6 if int(ip_version or 4) == 6 else 4
@@ -494,14 +546,15 @@ def create_run(target, backend_ids, ip_version=4, target_host='', **params):
     ports = params.get('ports') or {}
     cur = db.execute(
         'INSERT INTO runs (target_id, target_name, target_host, target_region, target_bandwidth, '
-        'ip_version, streams, duration, port, udp, udp_bandwidth, ping_count) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        'ip_version, streams, duration, port, udp, udp_bandwidth, ping_count, source, schedule_id) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         (target['id'], target['name'],
          target_host or (target['agent_ip'] or 'IP待agent上报'),
          target['region'], target['bandwidth'], ip_version,
          int(params.get('streams') or 1), int(params.get('duration') or 10),
          default_port, 1 if params.get('udp') else 0,
-         str(params.get('udp_bandwidth') or '100M'), int(params.get('ping_count') or 200)))
+         str(params.get('udp_bandwidth') or '100M'), int(params.get('ping_count') or 200),
+         str(source or 'manual')[:32], schedule_id))
     run_id = cur.lastrowid
     for bid in backend_ids:
         m = get_machine(bid)
@@ -697,4 +750,174 @@ def cancel_queued_jobs(machine_ids):
         f"UPDATE jobs SET status='failed', exit_code=-1, output = output || ? "
         f'WHERE status=\'queued\' AND machine_id IN ({marks})',
         ('[面板] 任务已取消\n', *machine_ids))
-    get_db().commit()
+    db.commit()
+
+
+# ---------------- 定时任务（长期重复测试，用于前后端长期对比） ----------------
+
+# 定时任务的字段白名单：改这里就等于改写入面，避免任意列被前端操纵
+_SCHED_COLS = {'name', 'enabled', 'target_id', 'backend_ids', 'ip_version', 'streams',
+               'duration', 'port', 'udp', 'udp_bandwidth', 'ping_count', 'ports',
+               'interval_seconds', 'on_busy', 'last_run_at', 'last_run_id', 'last_status',
+               'next_run_at', 'run_count', 'fail_count', 'skip_count', 'last_error'}
+
+
+def _sql_now(now=None):
+    return now or datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def get_schedules():
+    rows = get_db().execute('SELECT * FROM schedules ORDER BY id').fetchall()
+    return [_sched_row(r) for r in rows]
+
+
+def get_schedule(sid):
+    r = get_db().execute('SELECT * FROM schedules WHERE id=?', (sid,)).fetchone()
+    return _sched_row(r) if r else None
+
+
+def _sched_row(r):
+    s = dict(r)
+    s['backend_ids'] = _load_json(s.get('backend_ids'), [])
+    s['ports'] = _load_json(s.get('ports'), {})
+    s['enabled'] = bool(s.get('enabled'))
+    return s
+
+
+def _load_json(raw, default):
+    try:
+        v = json.loads(raw) if raw else default
+    except (TypeError, ValueError):
+        v = default
+    return v if isinstance(v, type(default)) else default
+
+
+def create_schedule(fields):
+    db = get_db()
+    cols = [c for c in fields if c in _SCHED_COLS]
+    marks = ','.join('?' * len(cols))
+    cur = db.execute(f'INSERT INTO schedules ({",".join(cols)}) VALUES ({marks})',
+                     [_sched_value(c, fields[c]) for c in cols])
+    db.commit()
+    return get_schedule(cur.lastrowid)
+
+
+def update_schedule(sid, fields):
+    db = get_db()
+    cols = [c for c in fields if c in _SCHED_COLS]
+    if not cols:
+        return get_schedule(sid)
+    sql = 'UPDATE schedules SET ' + ', '.join(f'{c}=?' for c in cols) + ' WHERE id=?'
+    db.execute(sql, [_sched_value(c, fields[c]) for c in cols] + [sid])
+    db.commit()
+    return get_schedule(sid)
+
+
+def _sched_value(col, val):
+    if col in ('enabled', 'ip_version', 'streams', 'duration', 'port', 'udp',
+               'ping_count', 'interval_seconds', 'run_count', 'fail_count', 'skip_count'):
+        return int(val or 0)
+    if col in ('backend_ids', 'ports'):
+        return json.dumps(val if val is not None else ([] if col == 'backend_ids' else {}),
+                          ensure_ascii=False)
+    return val
+
+
+def delete_schedule(sid):
+    db = get_db()
+    db.execute('DELETE FROM schedule_runs WHERE schedule_id=?', (sid,))
+    db.execute('DELETE FROM schedules WHERE id=?', (sid,))
+    db.commit()
+
+
+def set_schedule_enabled(sid, enabled):
+    return update_schedule(sid, {'enabled': 1 if enabled else 0})
+
+
+def due_schedules(now=None):
+    """到点且启用中的定时任务（长时间没跑过、面板重启恢复后也会被选中）。"""
+    rows = get_db().execute(
+        "SELECT * FROM schedules WHERE enabled=1 AND "
+        "COALESCE(next_run_at, datetime('now','localtime')) <= ? "
+        'ORDER BY COALESCE(next_run_at, created_at) ASC', (_sql_now(now),)).fetchall()
+    return [_sched_row(r) for r in rows]
+
+
+def schedule_next_run(sid, next_at, note=None, failed=False, skipped=False):
+    """推进下一次执行时间，并把本轮结果计数写回。"""
+    fields = {'next_run_at': next_at}
+    if skipped:
+        fields['skip_count'] = (get_schedule(sid) or {}).get('skip_count', 0) + 1
+    elif failed:
+        fields['fail_count'] = (get_schedule(sid) or {}).get('fail_count', 0) + 1
+    if note is not None:
+        fields['last_error'] = note
+    update_schedule(sid, fields)
+    return get_schedule(sid)
+
+
+def record_schedule_run(sid, run_id, planned_at, started_at=None, status='running', note=''):
+    """写一条定时任务执行记录（run_id 为空表示这一轮没有真正跑起来）。"""
+    db = get_db()
+    cols = ['schedule_id', 'run_id', 'planned_at', 'status', 'note']
+    vals = [sid, run_id, planned_at, status, note]
+    if started_at:
+        cols.insert(3, 'started_at')
+        vals.insert(3, started_at)
+    marks = ','.join('?' * len(cols))
+    cur = db.execute(f'INSERT INTO schedule_runs ({",".join(cols)}) VALUES ({marks})', vals)
+    db.commit()
+    return cur.lastrowid
+
+
+def finish_schedule_run(sid, run_id, status, note=''):
+    """测试跑完：回填定时任务与这一轮的状态。"""
+    db = get_db()
+    row = db.execute(
+        'SELECT id FROM schedule_runs WHERE schedule_id=? AND run_id=? ORDER BY id DESC LIMIT 1',
+        (sid, run_id)).fetchone()
+    if row:
+        db.execute('UPDATE schedule_runs SET status=?, note=? WHERE id=?', (status, note, row['id']))
+    db.commit()
+    s = get_schedule(sid) or {}
+    fields = {
+        'last_status': status,
+        'last_run_at': _sql_now(),
+        'last_run_id': run_id,
+        'run_count': int(s.get('run_count') or 0) + 1,
+        'last_error': '' if status == 'finished' else note,
+    }
+    if status != 'finished':
+        fields['fail_count'] = int(s.get('fail_count') or 0) + 1
+    update_schedule(sid, fields)
+    return get_schedule(sid)
+
+
+def get_schedule_runs(sid, limit=200):
+    rows = get_db().execute(
+        'SELECT * FROM schedule_runs WHERE schedule_id=? ORDER BY id DESC LIMIT ?',
+        (sid, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def schedule_run_window(sid, limit=100):
+    """取该定时任务最近 limit 轮**真正跑起来**的测试记录（旧→新），供对比报告使用。"""
+    db = get_db()
+    rows = db.execute(
+        'SELECT r.id FROM schedule_runs sr JOIN runs r ON r.id = sr.run_id '
+        'WHERE sr.schedule_id=? AND sr.run_id IS NOT NULL '
+        'ORDER BY sr.id DESC LIMIT ?', (sid, limit)).fetchall()
+    ids = [r['id'] for r in rows][::-1]
+    out = []
+    for rid in ids:
+        run = get_run(rid)
+        if not run:
+            continue
+        items = get_run_items(rid)
+        for it in items:
+            try:
+                it['metrics_obj'] = json.loads(it['metrics']) if it['metrics'] else None
+            except (TypeError, ValueError):
+                it['metrics_obj'] = None
+        out.append({'run': run, 'items': items})
+    return out

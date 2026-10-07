@@ -1,7 +1,9 @@
 """用样例数据验证解析/评价/报告逻辑。直接运行: python tests/test_sample.py"""
+import json
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ['DATA_DIR'] = tempfile.mkdtemp(prefix='iperf3-fleet-test-')
@@ -833,6 +835,279 @@ def test_daemon_guard():
     print('发行版 iperf3 守护进程体检 / apt 非交互安装 OK')
 
 
+def test_schedule_params():
+    """定时任务字段校验：间隔收敛、参数与手动测试同一套、非法值给出可读原因。"""
+    from app import scheduler
+    from app.app import app as flask_app
+    from app import db
+    db.init_db()
+
+    # 1) 校验与默认值
+    s = scheduler.normalize_schedule({'target_id': 7, 'backend_ids': [1, 2, 2]})
+    assert s['target_id'] == 7 and s['backend_ids'] == [1, 2], s     # 去重
+    assert s['interval_seconds'] == 3600 and s['on_busy'] == 'skip', s
+    assert s['name'] == '定时任务' and s['enabled'] == 1, s
+    s = scheduler.normalize_schedule({'target_id': 7, 'backend_ids': ['1'], 'name': '  长期对比  ',
+                                      'interval_seconds': '900', 'on_busy': 'wait', 'udp': True,
+                                      'udp_bandwidth': '50m', 'ports': {'1': 6001, '2': 'x'}})
+    assert s['name'] == '长期对比' and s['interval_seconds'] == 900 and s['on_busy'] == 'wait', s
+    assert s['udp_bandwidth'] == '50M' and s['ports'] == {1: 6001}, s
+
+    # 2) 非法值一律拒绝，不能悄悄换成别的参数
+    for bad in ({'target_id': 0, 'backend_ids': [1]},
+                {'target_id': 7},
+                {'target_id': 7, 'backend_ids': []},
+                {'target_id': 7, 'backend_ids': [1], 'interval_seconds': 10},        # 最短 5 分钟
+                {'target_id': 7, 'backend_ids': [1], 'interval_seconds': 10 ** 9},   # 最长 30 天
+                {'target_id': 7, 'backend_ids': [1], 'streams': 0},
+                {'target_id': 7, 'backend_ids': [1], 'duration': 9999}):
+        try:
+            scheduler.normalize_schedule(bad)
+            raise AssertionError(f'{bad} 应该被拒绝')
+        except scheduler.InvalidSchedule:
+            pass
+
+    # 3) 人话化的间隔与倒计时（面板直接显示这些字符串）
+    assert scheduler._human_duration(300) == '5 分钟'
+    assert scheduler._human_duration(3600) == '1 小时'
+    assert scheduler._human_duration(86400) == '1 天'
+    assert scheduler._human_duration(90000) == '25 小时'
+    assert scheduler._human_delta(-5) == '即将执行'
+    assert scheduler._human_delta(59) == '59 秒后'
+    assert scheduler._human_delta(3599) == '59 分钟后'
+    assert scheduler._human_delta(7200) == '2 小时 0 分后'
+
+    # 4) 下次执行时间：固定间隔语义（现在 + 间隔），并夹住上下限
+    now = 1_700_000_000.0
+    assert scheduler.compute_next(600, now) == scheduler.now_str(now + 600)
+    assert scheduler.compute_next(1, now) == scheduler.now_str(now + scheduler.MIN_INTERVAL)
+    assert scheduler.parse_time('2026-01-02 03:04:05') is not None
+    assert scheduler.parse_time('') is None and scheduler.parse_time('乱码') is None
+
+    # 5) API：非法参数 400，合法创建后能在列表里看到人话化的摘要
+    t = db.create_machine({'name': 'sch-t', 'role': 'target', 'region': '香港',
+                           'bandwidth': '500M'})
+    b = db.create_machine({'name': 'sch-b', 'role': 'backend', 'region': '东京',
+                           'bandwidth': '200M'})
+    c = flask_app.test_client()
+    _login(c)
+    r = c.post('/api/schedules', json={'target_id': t['id'], 'backend_ids': [b['id']],
+                                       'interval_seconds': 60})
+    assert r.status_code == 400 and '间隔时间' in r.get_json()['error'], r.get_json()
+    r = c.post('/api/schedules', json={'target_id': t['id'], 'backend_ids': [b['id']],
+                                       'duration': 0})
+    assert r.status_code == 400 and '时长' in r.get_json()['error'], r.get_json()
+    r = c.post('/api/schedules', json={'target_id': t['id'], 'backend_ids': [b['id']],
+                                       'name': '长期对比', 'interval_seconds': 600,
+                                       'streams': 2, 'duration': 5, 'ping_count': 20,
+                                       'udp': True, 'udp_bandwidth': '50M'})
+    assert r.status_code == 200, r.get_json()
+    got = r.get_json()
+    assert got['interval_text'] == '10 分钟' and got['backend_count'] == 1, got
+    assert got['target_name'] == 'sch-t' and got['backend_names'] == ['sch-b'], got
+    assert got['udp'] == 1 and got['streams'] == 2 and got['ping_count'] == 20, got
+    assert got['next_run_in'], got                       # 菜单上要显示「X 分钟后执行」
+    sid = got['id']
+    lst = c.get('/api/schedules').get_json()
+    assert any(x['id'] == sid for x in lst), lst
+
+    # 6) 改间隔要重排下一次；改名字不能把周期重置掉
+    before = db.get_schedule(sid)['next_run_at']
+    r = c.put(f'/api/schedules/{sid}', json={
+        'target_id': t['id'], 'backend_ids': [b['id']], 'name': '长期对比-改名',
+        'interval_seconds': 600, 'streams': 2, 'duration': 5, 'ping_count': 20,
+        'udp': True, 'udp_bandwidth': '50M'})
+    assert r.status_code == 200, r.get_json()
+    assert db.get_schedule(sid)['next_run_at'] == before, '同名同间隔的编辑不该重置周期'
+    r = c.put(f'/api/schedules/{sid}', json={
+        'target_id': t['id'], 'backend_ids': [b['id']], 'name': '长期对比-改名',
+        'interval_seconds': 1800, 'streams': 2, 'duration': 5, 'ping_count': 20})
+    assert r.status_code == 200, r.get_json()
+    assert db.get_schedule(sid)['next_run_at'] != before, '改了间隔应该重排下一次'
+
+    # 7) 停用 / 启用 / 删除
+    r = c.post(f'/api/schedules/{sid}/toggle')
+    assert r.status_code == 200 and r.get_json()['enabled'] is False, r.get_json()
+    assert db.due_schedules('2099-01-01 00:00:00') == [] or all(
+        x['id'] != sid for x in db.due_schedules('2099-01-01 00:00:00'))
+    r = c.post(f'/api/schedules/{sid}/toggle')
+    assert r.get_json()['enabled'] is True, r.get_json()
+    assert c.get(f'/api/schedules/{sid}').status_code == 200
+    assert c.delete(f'/api/schedules/{sid}').status_code == 200
+    assert c.get(f'/api/schedules/{sid}').status_code == 404
+    print('定时任务字段校验 / API / 周期重排 OK')
+
+
+def test_schedule_trigger_flow():
+    """触发一轮：正常启动、与手动测试冲突时跳过并说明原因、等待模式不丢轮次。"""
+    from app import db, runner, scheduler
+    db.init_db()
+    t = db.create_machine({'name': 'trig-t', 'role': 'target', 'region': '', 'bandwidth': ''})
+    b = db.create_machine({'name': 'trig-b', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    db.touch_machine(t['id'], 'trig-t', '93.184.216.34')
+    db.touch_machine(b['id'], 'trig-b', '93.184.216.34')
+
+    sch = db.create_schedule(dict(
+        scheduler.normalize_schedule({'target_id': t['id'], 'backend_ids': [b['id']],
+                                      'name': '触发用例', 'interval_seconds': 600}),
+        next_run_at=scheduler.compute_next(600)))
+
+    # 1) 正常触发：真正创建了 run（手动测试同一套校验/落库），来源标记为 schedule
+    started = {}
+    real_start_run = runner.start_run
+
+    def fake_start_run(target_id, backend_ids, ip_version=4, params=None,
+                       source='manual', schedule_id=None, label=''):
+        started.update(target_id=target_id, backend_ids=backend_ids, ip_version=ip_version,
+                       params=params, source=source, schedule_id=schedule_id, label=label)
+        return 4242
+
+    runner.start_run = fake_start_run
+    try:
+        ok, note = scheduler.trigger(sch['id'])
+        assert ok, note
+        assert started['source'] == 'schedule' and started['schedule_id'] == sch['id'], started
+        assert started['backend_ids'] == [b['id']] and started['params']['port'] == 5201, started
+    finally:
+        runner.start_run = real_start_run
+    s = db.get_schedule(sch['id'])
+    assert s['last_run_id'] == 4242 and s['last_status'] == 'running', s
+    assert s['next_run_at'] > scheduler.now_str(), s           # 触发后立刻推下一次，避免重复触发
+    assert db.get_schedule_runs(sch['id'])[0]['run_id'] == 4242
+
+    # 2) 完成回填：run 跑完后把状态写回定时任务与这一轮
+    rid = db.create_run(t, [b['id']], 4, target_host='93.184.216.34', source='schedule',
+                        schedule_id=sch['id'], port=5201, streams=1, duration=1,
+                        udp=False, udp_bandwidth='100M', ping_count=1)
+    db.update_run(rid, status='finished')
+    db.update_schedule(sch['id'], {'last_run_id': rid, 'last_status': 'running'})
+    db.record_schedule_run(sch['id'], rid, scheduler.now_str(), status='running')
+    scheduler.finish_pending()
+    s = db.get_schedule(sch['id'])
+    assert s['last_status'] == 'finished' and s['run_count'] == 1, s
+    assert s['last_error'] == '', s
+    sr = [x for x in db.get_schedule_runs(sch['id']) if x['run_id'] == rid][0]
+    assert sr['status'] == 'finished', sr
+
+    # 3) 与手动测试冲突：默认跳过本轮，且原因写在面板能看到的地方
+    runner._active[999999] = {'stop': False, 'log': []}      # 模拟「有测试在跑」
+    try:
+        ok, note = scheduler.trigger(sch['id'])
+        assert not ok and '已有测试' in note, note
+    finally:
+        runner._active.pop(999999, None)
+    s = db.get_schedule(sch['id'])
+    assert s['last_status'] == 'skipped' and s['skip_count'] == 1, s
+    assert '已有测试' in s['last_error'], s
+    sr = db.get_schedule_runs(sch['id'])[0]
+    assert sr['status'] == 'skipped' and sr['run_id'] is None, sr
+
+    # 4) on_busy=wait：不记跳过，改成过一会儿再看（同一轮不会丢）
+    db.update_schedule(sch['id'], {'on_busy': 'wait', 'skip_count': 0})
+    runner._active[999998] = {'stop': False, 'log': []}
+    try:
+        ok, note = scheduler.trigger(sch['id'])
+        assert not ok and '等待' in note, note
+    finally:
+        runner._active.pop(999998, None)
+    s = db.get_schedule(sch['id'])
+    assert s['last_status'] == 'waiting' and s['skip_count'] == 0, s
+    assert 0 < scheduler.parse_time(s['next_run_at']) - time.time() <= 300, s['next_run_at']
+
+    # 5) 机器被删除 / 角色被改：跳过并给出可读原因
+    db.delete_machine(b['id'])
+    ok, note = scheduler.trigger(sch['id'])
+    assert not ok and '已被删除' in note, note
+    assert '已被删除' in db.get_schedule(sch['id'])['last_error']
+    print('定时任务触发 / 冲突跳过 / 等待 / 机器失联 OK')
+
+
+def test_schedule_restart_recovery():
+    """面板重启：定时任务不能丢，正在跑的那一轮标中断，下次时间保持不变。"""
+    from app import db, scheduler
+    db.init_db()
+    t = db.create_machine({'name': 'rc-t', 'role': 'target', 'region': '', 'bandwidth': ''})
+    b = db.create_machine({'name': 'rc-b', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    sch = db.create_schedule(dict(
+        scheduler.normalize_schedule({'target_id': t['id'], 'backend_ids': [b['id']],
+                                      'name': '重启用例', 'interval_seconds': 600}),
+        next_run_at='2026-01-01 00:00:00', last_status='running', last_run_id=777))
+    db.record_schedule_run(sch['id'], 777, '2026-01-01 00:00:00', status='running')
+
+    db.mark_stale_runs()                      # 等价于面板进程重启时的自愈
+    s = db.get_schedule(sch['id'])
+    assert s['enabled'] == 1, s
+    assert s['last_status'] == 'interrupted', s
+    assert s['next_run_at'] == '2026-01-01 00:00:00', '重启不应改动排期'
+    sr = db.get_schedule_runs(sch['id'])[0]
+    assert sr['status'] == 'interrupted', sr
+
+    # 已经过点的任务会在下一次 tick 被选中（重启后继续按原计划跑）
+    assert any(x['id'] == sch['id'] for x in db.due_schedules()), db.due_schedules()
+    db.delete_schedule(sch['id'])
+    print('定时任务重启恢复 OK')
+
+
+def test_schedule_comparison_report():
+    """长期对比：跨轮汇总、趋势计算、Markdown 报告（含脱敏）。"""
+    from app import db, quality, scheduler
+    db.init_db()
+    t = db.create_machine({'name': 'cmp-t', 'role': 'target', 'region': '香港',
+                           'bandwidth': '1G'})
+    b = db.create_machine({'name': 'cmp-b', 'role': 'backend', 'region': '东京',
+                           'bandwidth': '500M'})
+    db.touch_machine(t['id'], 'cmp-t', '93.184.216.34')     # 报告里目标机地址要能取到并脱敏
+    sch = db.create_schedule(dict(
+        scheduler.normalize_schedule({'target_id': t['id'], 'backend_ids': [b['id']],
+                                      'name': '对比用例', 'interval_seconds': 600,
+                                      'duration': 10}),
+        next_run_at=scheduler.compute_next(600)))
+
+    # 造 6 轮：上行从 100 逐步掉到 70，检验趋势为下滑
+    for i, up in enumerate((100.0, 98.0, 96.0, 82.0, 76.0, 70.0)):
+        rid = db.create_run(t, [b['id']], 4, target_host='93.184.216.34', source='schedule',
+                            schedule_id=sch['id'], port=5201, streams=1, duration=10,
+                            udp=False, udp_bandwidth='100M', ping_count=10)
+        mt_up = (f'[ ID] Interval           Transfer     Bitrate         Retr\n'
+                 f'[  5]   0.00-10.00  sec   100 MBytes  {up} Mbits/sec    0             sender\n'
+                 f'[  5]   0.00-10.10  sec   100 MBytes  {up} Mbits/sec                  receiver\n')
+        mt_down = (f'[ ID] Interval           Transfer     Bitrate         Retr\n'
+                   f'[  5]   0.00-10.10  sec   100 MBytes  {up + 10} Mbits/sec    0             sender\n'
+                   f'[  5]   0.00-10.00  sec   100 MBytes  {up + 8} Mbits/sec                  receiver\n')
+        metrics = quality.parse_metrics(PING_RAW, mt_up, mt_down)
+        quality.evaluate(metrics, b)
+        db.update_item(db.get_run_items(rid)[0]['id'], status='done', phase='完成',
+                       metrics=json.dumps(metrics))
+        db.update_run(rid, status='finished')
+        db.record_schedule_run(sch['id'], rid, scheduler.now_str(), status='finished')
+        db.finish_schedule_run(sch['id'], rid, 'finished')
+
+    data = scheduler.comparison_data(sch['id'])
+    assert len(data['rounds']) == 6, data['rounds']
+    m = data['machines'][0]
+    assert m['name'] == 'cmp-b' and len(m['series']) == 6, m
+    st = data['stats'][0]
+    assert st['samples'] == 6 and abs(st['up']['min'] - 70.0) < 1e-6, st
+    assert abs(st['up']['max'] - 100.0) < 1e-6 and abs(st['up']['avg'] - (100 + 98 + 96 + 82 + 76 + 70) / 6) < 1e-6, st
+    assert st['trend_pct'] is not None and st['trend_pct'] < -3, st   # 明显下滑
+
+    rep = scheduler.build_comparison_report(sch['id'])
+    assert '# iperf3 长期对比报告' in rep, rep
+    assert '对比用例' in rep and 'cmp-b' in rep and '趋势' in rep, rep
+    assert '93.184.*.*' in rep and '216.34' not in rep, rep         # 报告脱敏
+    assert '每 10 分钟' in rep, rep
+    assert '已完成轮次' in rep and '成功 6' in rep, rep
+
+    # 空数据不能炸
+    empty = db.create_schedule(dict(
+        scheduler.normalize_schedule({'target_id': t['id'], 'backend_ids': [b['id']],
+                                      'name': '空用例'}), next_run_at='2026-01-01 00:00:00'))
+    rep2 = scheduler.build_comparison_report(empty['id'])
+    assert '还没有完成任何一轮测试' in rep2, rep2
+    assert scheduler.comparison_data(999999) is None
+    print('长期对比数据 / 趋势 / Markdown 报告 OK')
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
@@ -850,4 +1125,8 @@ if __name__ == '__main__':
     test_machine_addr_override()
     test_server_lifecycle()
     test_daemon_guard()
+    test_schedule_params()
+    test_schedule_trigger_flow()
+    test_schedule_restart_recovery()
+    test_schedule_comparison_report()
     print('\nALL TESTS PASSED')

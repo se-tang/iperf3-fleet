@@ -4,13 +4,14 @@
 
 ```
 app/
-  app.py              面板 Web 服务：登录、机器管理、Agent API、任务接口
-  db.py               SQLite 数据层：机器、任务队列、测试记录、登录凭据
+  app.py              面板 Web 服务：登录、机器管理、Agent API、任务接口、定时任务接口
+  db.py               SQLite 数据层：机器、任务队列、测试记录、定时任务、长期对比数据
   runner.py           测试编排：环境准备 → iperf3 串行 → ping 并行 → 报告
+  scheduler.py        定时任务调度：排期 / 触发 / 冲突处理 / 重启恢复 / 跨轮对比报告
   agent_jobs.py       下发给 Agent 执行的脚本（装 iperf3、起 server、地址探测）
   agent/              节点机接入 / 卸载脚本（install.sh 由面板下发给节点）
   templates/          前端单页 index.html
-tests/test_sample.py  解析 / 评价 / 报告 / 协议 / 地址探测 / 任务编号 测试
+tests/test_sample.py  解析 / 评价 / 报告 / 协议 / 地址探测 / 任务编号 / 定时任务 测试
 install.sh            面板一键部署脚本
 Caddyfile.acme        自动签证书反代模板（方式 A）
 Caddyfile.origin      Cloudflare 源证书反代模板（方式 B）
