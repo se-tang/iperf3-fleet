@@ -750,7 +750,7 @@ def cancel_queued_jobs(machine_ids):
         f"UPDATE jobs SET status='failed', exit_code=-1, output = output || ? "
         f'WHERE status=\'queued\' AND machine_id IN ({marks})',
         ('[面板] 任务已取消\n', *machine_ids))
-    db.commit()
+    get_db().commit()
 
 
 # ---------------- 定时任务（长期重复测试，用于前后端长期对比） ----------------
