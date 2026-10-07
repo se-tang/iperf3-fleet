@@ -404,6 +404,8 @@ def _worker(run_id, target, ip_version=4):
             code, out = _job(target, aj.script_start_server(p, ttl), 30, log, stop_check)
             if code == 0:
                 started_ports.append(p)
+                # 立刻落库：面板万一在这之后崩溃/被重启，下次启动能按这个清单回收 server
+                db.update_run(run_id, served_ports=' '.join(str(x) for x in started_ports))
                 continue
             if required:
                 msg = f'目标机 iperf3 -s 启动失败（端口 {p}）: ' + (out or '').strip()[-300:]
@@ -644,6 +646,64 @@ def _discovery_pass():
             continue
         _discover_next[m['id']] = now + DISCOVER_COOLDOWN
         queue_discovery(m['id'])
+
+
+# 面板重启后回收「孤儿 iperf3 server」：上一次重启把测试从中间掐断时，关闭指令
+# 可能没送到，目标机上会留一个裸 server 占着端口（下一轮必然启动失败）。
+# 这里按测试记录里存的端口清单，等机器一上线就精确回收（只认本面板自己的模式）。
+_ORPHAN_RETRY_SECONDS = 60
+_orphan_next = {}                 # run_id -> 下次允许重试回收的时间戳
+
+
+def clear_orphan_servers(force=False):
+    """回收「面板重启时被中断」遗留的目标机 iperf3 server；返回回收成功的 run 列表。"""
+    done = []
+    for rec in db.runs_with_orphan_ports():
+        mid = rec['target_id']
+        m = db.get_machine(mid)
+        if not m or not db.machine_online(m):
+            continue
+        if not force and time.time() < _orphan_next.get(rec['id'], 0):
+            continue
+        ports = [aj.valid_port(p, None) for p in str(rec['served_ports']).split()]
+        ports = [p for p in ports if p]
+        if not ports:
+            db.mark_orphan_ports_cleared(rec['id'])
+            continue
+        try:
+            _job(m, aj.script_stop_server(ports), 15, lambda _s: None, None)
+        except Exception as e:
+            _orphan_next[rec['id']] = time.time() + _ORPHAN_RETRY_SECONDS
+            print(f'[回收] 机器「{m["name"]}」端口 {ports} 的残留 server 未回收：{e}', flush=True)
+            continue
+        db.mark_orphan_ports_cleared(rec['id'])
+        print(f'[回收] 已清理机器「{m["name"]}」上残留的 iperf3 server（端口 {ports}）', flush=True)
+        done.append(rec['id'])
+    return done
+
+
+def start_orphan_reclaimer():
+    """后台线程：面板启动后回收上一次重启遗留的目标机 server（独立于地址探测，互不阻塞）。"""
+    def run():
+        for attempt in range(30):        # 机器可能还没上线，等它；最多重试 30 轮
+            try:
+                if not active_run_id() and clear_orphan_servers():
+                    break
+                if not db.runs_with_orphan_ports():
+                    break
+            except Exception as e:
+                print(f'[回收] 异常（不影响其它功能）：{e}', flush=True)
+            time.sleep(20 if attempt < 3 else 60)
+        # 之后交给定期巡检兜底（机器离线久了才上线的情况）
+        while True:
+            time.sleep(300)
+            try:
+                if not active_run_id():
+                    clear_orphan_servers()
+            except Exception:
+                pass
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def queue_discovery(mid, force=False):
