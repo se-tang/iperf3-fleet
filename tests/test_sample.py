@@ -902,11 +902,12 @@ def test_schedule_params():
         except scheduler.InvalidSchedule:
             pass
 
-    # 3) 人话化的间隔与倒计时（面板直接显示这些字符串）
-    assert scheduler._human_duration(300) == '5 分钟'
-    assert scheduler._human_duration(3600) == '1 小时'
-    assert scheduler._human_duration(86400) == '1 天'
-    assert scheduler._human_duration(90000) == '25 小时'
+    # 3) 人话化的间隔与倒计时（面板直接显示这些字符串）；数字与单位之间是不换行空格
+    assert scheduler._human_duration(300) == '5\u00a0分钟'
+    assert scheduler._human_duration(3600) == '1\u00a0小时'
+    assert scheduler._human_duration(86400) == '1\u00a0天'
+    assert scheduler._human_duration(90000) == '25\u00a0小时'
+    assert '\u00a0' in scheduler._human_duration(600), '间隔文案必须是单个不可断行的词'
     assert scheduler._human_delta(-5) == '即将执行'
     assert scheduler._human_delta(59) == '59 秒后'
     assert scheduler._human_delta(3599) == '59 分钟后'
@@ -938,7 +939,7 @@ def test_schedule_params():
                                        'udp': True, 'udp_bandwidth': '50M'})
     assert r.status_code == 200, r.get_json()
     got = r.get_json()
-    assert got['interval_text'] == '10 分钟' and got['backend_count'] == 1, got
+    assert got['interval_text'] == '10\u00a0分钟' and got['backend_count'] == 1, got
     assert got['target_name'] == 'sch-t' and got['backend_names'] == ['sch-b'], got
     assert got['udp'] == 1 and got['streams'] == 2 and got['ping_count'] == 20, got
     assert got['next_run_in'], got                       # 菜单上要显示「X 分钟后执行」
@@ -1130,7 +1131,7 @@ def test_schedule_comparison_report():
     assert '# iperf3 长期对比报告' in rep, rep
     assert '对比用例' in rep and 'cmp-b' in rep and '趋势' in rep, rep
     assert '93.184.*.*' in rep and '216.34' not in rep, rep         # 报告脱敏
-    assert '每 10 分钟' in rep, rep
+    assert '每 10\u00a0分钟' in rep, rep
     assert '已完成轮次' in rep and '成功 6' in rep, rep
 
     # 空数据不能炸
