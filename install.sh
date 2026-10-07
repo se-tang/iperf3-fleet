@@ -72,9 +72,13 @@ log_file() { printf '%s\n' "$*" >>"$LOG_FILE" 2>/dev/null || true; }
 # 一步的开始 / 结束：非交互环境下退化为普通的两行文字
 step() {
   STEP_T0="$(date +%s 2>/dev/null || echo 0)"
+  STEP_NOTE=""
   printf '  %s▸%s %s ... ' "$C_CYAN" "$C_RESET" "$1"
 }
 step_done() {
+  # 补充说明放在结果之前输出，保证「▸ 步骤 ... 结果」永远是一行完整的信息
+  [ -n "${STEP_NOTE:-}" ] && printf '%s%s%s ' "$C_DIM" "$STEP_NOTE" "$C_RESET"
+  STEP_NOTE=""
   _now="$(date +%s 2>/dev/null || echo 0)"
   _ms=$(( (_now - STEP_T0) * 1000 ))
   if [ "$_ms" -lt 100 ] 2>/dev/null; then
@@ -87,7 +91,7 @@ step_done() {
       "$(( _now - STEP_T0 ))" "$C_RESET"
   fi
 }
-step_note() { printf '%s%s%s\n' "$C_DIM" "      $*" "$C_RESET"; }
+step_note() { STEP_NOTE="${STEP_NOTE:+$STEP_NOTE；}$*"; }
 
 info() { printf '  %s·%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
 warn() { printf '  %s!%s %s\n' "$C_YELLOW$C_BOLD" "$C_RESET" "$*"; }

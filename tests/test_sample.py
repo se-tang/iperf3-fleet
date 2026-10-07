@@ -835,6 +835,41 @@ def test_daemon_guard():
     print('发行版 iperf3 守护进程体检 / apt 非交互安装 OK')
 
 
+def test_job_cleanup_paths():
+    """任务收尾路径：作废排队任务 / 标记过期测试不能抛异常（曾在此处踩过 NameError）。
+
+    背景：_worker 的 finally 里会调用 cancel_queued_jobs，一旦它抛异常，
+    整个测试线程会静默死掉——面板上表现为「测试永远停在运行中、报告不生成」。
+    """
+    from app import db
+    db.init_db()
+    t = db.create_machine({'name': 'clean-t', 'role': 'target', 'region': '', 'bandwidth': ''})
+    b = db.create_machine({'name': 'clean-b', 'role': 'backend', 'region': '', 'bandwidth': ''})
+
+    # 队列里三个任务：两个属于本次机器、一个是别人的
+    j1 = db.create_job(b['id'], 'echo hi', 30)
+    j2 = db.create_job(b['id'], 'echo hi', 30)
+    other = db.create_machine({'name': 'clean-x', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    j3 = db.create_job(other['id'], 'echo hi', 30)
+    db.create_job(t['id'], 'echo hi', 30)
+
+    db.cancel_queued_jobs([b['id'], t['id']])              # 不能抛
+    assert db.get_job(j1)['status'] == 'failed', db.get_job(j1)
+    assert db.get_job(j2)['status'] == 'failed'
+    assert db.get_job(j3)['status'] == 'queued', db.get_job(j3)   # 别的机器不受影响
+    assert '任务已取消' in db.get_job(j1)['output'], db.get_job(j1)['output']
+    db.cancel_queued_jobs([])                              # 空列表也要能过
+    db.cancel_queued_jobs(None)
+
+    # 重启自愈：running/pending 的测试标失败，排队任务作废
+    rid = db.create_run(t, [b['id']], 4, target_host='93.184.216.34', port=5201, streams=1,
+                        duration=1, udp=False, udp_bandwidth='100M', ping_count=1)
+    db.mark_stale_runs()
+    assert db.get_run(rid)['status'] == 'failed', db.get_run(rid)
+    assert db.get_job(j3)['status'] == 'failed', db.get_job(j3)
+    print('任务收尾路径（取消排队 / 重启自愈）OK')
+
+
 def test_schedule_params():
     """定时任务字段校验：间隔收敛、参数与手动测试同一套、非法值给出可读原因。"""
     from app import scheduler
@@ -1125,6 +1160,7 @@ if __name__ == '__main__':
     test_machine_addr_override()
     test_server_lifecycle()
     test_daemon_guard()
+    test_job_cleanup_paths()
     test_schedule_params()
     test_schedule_trigger_flow()
     test_schedule_restart_recovery()
