@@ -870,6 +870,62 @@ def test_job_cleanup_paths():
     print('任务收尾路径（取消排队 / 重启自愈）OK')
 
 
+def test_orphan_server_reclaim():
+    """面板重启遗留的孤儿 iperf3 server：按记录端口精确回收（否则后一轮必然撞端口）。
+
+    真实场景：面板在「server 已起、关闭指令未送出」的窗口里被重启，目标机上留下裸
+    server 占着端口，下一轮（尤其是定时任务）启动 server 必然失败。
+    """
+    from app import db, runner
+    db.init_db()
+    t = db.create_machine({'name': 'orph-t', 'role': 'target', 'region': '', 'bandwidth': ''})
+    b = db.create_machine({'name': 'orph-b', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    db.touch_machine(t['id'], 'orph-t', '93.184.216.34')
+    db.touch_machine(b['id'], 'orph-b', '93.184.216.34')
+
+    # 中断的测试：只起了 5201 就崩了
+    rid = db.create_run(t, [b['id']], 4, target_host='93.184.216.34', port=5201, streams=1,
+                        duration=1, udp=False, udp_bandwidth='100M', ping_count=1)
+    db.update_run(rid, served_ports='6002 5201')       # 本轮起过的端口（有序落库）
+    db.mark_stale_runs()                               # 面板重启自愈
+
+    assert db.get_run(rid)['status'] == 'failed', db.get_run(rid)
+    recs = db.runs_with_orphan_ports()
+    assert any(r['id'] == rid for r in recs), recs
+
+    calls = []
+    real_job = runner._job
+
+    def fake_job(machine, cmd, timeout, log, stop_check):
+        calls.append((machine['id'], cmd))
+        return 0, 'IPERF3_SERVER_STOPPED'
+
+    runner._job = fake_job
+    try:
+        done = runner.clear_orphan_servers(force=True)
+    finally:
+        runner._job = real_job
+    assert rid in done, (done, calls)
+    assert calls and calls[0][0] == t['id'], calls
+    # 只回收记录里那两个端口，且不能是无差别的裸 pkill
+    assert 'PORTS="5201 6002"' in calls[0][1], calls[0][1]
+    assert "pkill -f 'iperf3 -s'" not in calls[0][1], calls[0][1]
+    # 回收过就不再重复派发
+    assert not db.runs_with_orphan_ports(), db.runs_with_orphan_ports()
+    assert runner.clear_orphan_servers(force=True) == []
+
+    # 机器离线时不派发（等它上线再回收），也不会把记录清掉
+    rid2 = db.create_run(t, [b['id']], 4, target_host='93.184.216.34', port=5201, streams=1,
+                         duration=1, udp=False, udp_bandwidth='100M', ping_count=1)
+    db.update_run(rid2, served_ports='5201')
+    db.mark_stale_runs()
+    db.get_db().execute('UPDATE machines SET last_seen=0 WHERE id=?', (t['id'],))
+    db.get_db().commit()
+    assert runner.clear_orphan_servers(force=True) == []
+    assert any(r['id'] == rid2 for r in db.runs_with_orphan_ports())
+    print('面板重启遗留 server 回收 OK')
+
+
 def test_schedule_params():
     """定时任务字段校验：间隔收敛、参数与手动测试同一套、非法值给出可读原因。"""
     from app import scheduler
@@ -1162,6 +1218,7 @@ if __name__ == '__main__':
     test_server_lifecycle()
     test_daemon_guard()
     test_job_cleanup_paths()
+    test_orphan_server_reclaim()
     test_schedule_params()
     test_schedule_trigger_flow()
     test_schedule_restart_recovery()

@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS runs (
     ping_count INTEGER NOT NULL DEFAULT 200,
     source TEXT NOT NULL DEFAULT 'manual',
     schedule_id INTEGER,
+    served_ports TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'running',
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     finished_at TEXT,
@@ -207,6 +208,10 @@ def init_db():
         db.execute("ALTER TABLE runs ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
     if cols_r and 'schedule_id' not in cols_r:
         db.execute('ALTER TABLE runs ADD COLUMN schedule_id INTEGER')
+    # 本轮在目标机上起过的 server 端口：面板重启后据此回收「孤儿 server」，
+    # 否则残留进程会占着端口，让后（尤其是定时任务的下一轮）启动失败
+    if cols_r and 'served_ports' not in cols_r:
+        db.execute("ALTER TABLE runs ADD COLUMN served_ports TEXT NOT NULL DEFAULT ''")
     cols_tb = [r['name'] for r in db.execute('PRAGMA table_info(agent_tombstones)').fetchall()]
     if cols_tb and 'cmd_b64' not in cols_tb:
         # 墓碑是一次性瞬态数据，结构变化直接重建
@@ -236,6 +241,24 @@ def mark_stale_runs():
         "UPDATE schedules SET last_status='interrupted', "
         "last_error='面板服务重启导致本轮中断' WHERE last_status='running'")
     db.commit()
+
+
+def runs_with_orphan_ports():
+    """面板重启时被中断、但目标机上可能还留着 iperf3 -s 的测试记录。
+
+    中断发生在「server 已起、关闭指令还没送出去」的窗口里时，那个裸 server 会一直
+    监听到存活上限到点，期间既占着端口（后一轮必然启动失败）又可能被扫到盗刷流量。
+    这里把这类记录捞出来，等目标机 Agent 上线后按记录里的端口精确回收。
+    """
+    rows = get_db().execute(
+        "SELECT id, target_id, target_name, served_ports FROM runs "
+        "WHERE served_ports != '' AND status='failed' "
+        "AND error LIKE '%面板服务重启%' ORDER BY id DESC LIMIT 20").fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_orphan_ports_cleared(rid):
+    update_run(rid, served_ports='')
 
 
 # ---------------- 登录凭据 ----------------
@@ -578,7 +601,7 @@ def get_runs(limit=50):
     return [dict(r) for r in rows]
 
 
-_RUN_COLS = {'status', 'report', 'log', 'error', 'finished_at'}
+_RUN_COLS = {'status', 'report', 'log', 'error', 'finished_at', 'served_ports'}
 
 
 def update_run(rid, **fields):

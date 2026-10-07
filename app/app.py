@@ -593,6 +593,7 @@ def handle_runtime_error(e):
 if __name__ == '__main__':
     db.init_db()
     runner.start_discovery_worker()
+    runner.start_orphan_reclaimer()
     scheduler.start_scheduler()
     from waitress import serve
     # clear_untrusted_proxy_headers=False：保留 X-Forwarded-For 交给 _client_ip()
