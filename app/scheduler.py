@@ -282,7 +282,7 @@ def finish_pending():
             continue
         if run['status'] in ('running', 'pending'):
             continue
-        total, done, failed = db.run_counts(rid)
+        _total, done, failed = db.run_counts(rid)
         note = run.get('error') or ''
         # 面板重启导致的中断：api_status() 会把 running 归一成 failed，这里要还原成
         # 「已中断」并计入失败，否则面板上会出现「完成 N 轮却一次都没跑成」的错账
