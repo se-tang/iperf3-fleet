@@ -269,32 +269,33 @@ def due_check_once():
 def finish_pending():
     """扫描「已启动但还没回填」的定时任务轮次，把结果写回。
 
-    用轮询而不是回调：runner 不需要知道调度器的存在，面板重启后也能自愈。
+    只认那些「已经安排了、但还没收尾」的轮次记录（schedule_runs.status='running'），
+    而不是看 schedules.last_run_id —— 后者在「跳过本轮 / 等待空档」时可能是更早的
+    那一轮，用它会导致计数重复累加。用轮询而不是回调：runner 不需要知道调度器的
+    存在，面板重启后也能自愈。
     """
-    for s in db.get_schedules():
-        rid = s.get('last_run_id')
-        if s.get('last_status') != 'running' or not rid:
-            continue
+    for entry in db.pending_schedule_runs():
+        sid, rid = entry['schedule_id'], entry['run_id']
         run = db.get_run(rid)
         if not run:
-            db.finish_schedule_run(s['id'], rid, 'failed', '测试记录已不存在')
+            db.finish_schedule_run(sid, rid, 'failed', '测试记录已不存在')
             continue
         if run['status'] in ('running', 'pending'):
             continue
         total, done, failed = db.run_counts(rid)
         note = run.get('error') or ''
+        # 面板重启导致的中断：api_status() 会把 running 归一成 failed，这里要还原成
+        # 「已中断」并计入失败，否则面板上会出现「完成 N 轮却一次都没跑成」的错账
+        interrupted = '面板服务重启' in note
+        status = 'interrupted' if interrupted else run['status']
         if not note and failed:
             note = f'{failed} 台后端失败'
         if not note and done == 0:
             note = '本轮全部失败'
-        db.finish_schedule_run(s['id'], rid, run['status'], note)
-        try:
-            db.update_schedule(s['id'], {
-                'next_run_at': db.get_schedule(s['id']).get('next_run_at')
-                or compute_next(s['interval_seconds']),
-            })
-        except Exception:
-            pass
+        db.finish_schedule_run(sid, rid, status, note)
+        cur = db.get_schedule(sid)
+        if cur and not cur.get('next_run_at'):
+            db.update_schedule(sid, {'next_run_at': compute_next(cur['interval_seconds'])})
 
 
 def _loop():

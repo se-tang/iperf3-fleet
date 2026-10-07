@@ -234,12 +234,22 @@ def mark_stale_runs():
         ('\n[面板] 面板重启，任务作废\n',))
     # 定时任务：把「中断」的那一轮标清楚，但**不动下次执行时间**——
     # 定时任务本身是长期挂着的，面板重启不该让它停掉，恢复后继续按原计划跑。
+    # 这里同时把该轮计数写进 schedules（run_count / fail_count），因为轮次记录一旦
+    # 变成 interrupted 就没有「待回填」的入口了，不在这一刻记账就会漏掉这一轮。
     db.execute(
         "UPDATE schedule_runs SET status='interrupted', note='面板服务重启导致中断' "
         "WHERE status='running'")
+    # 计数从轮次记录重算（每个任务各算各的），天然幂等，重复重启也不会越加越大
     db.execute(
-        "UPDATE schedules SET last_status='interrupted', "
-        "last_error='面板服务重启导致本轮中断' WHERE last_status='running'")
+        'UPDATE schedules SET '
+        'run_count=(SELECT COUNT(*) FROM schedule_runs sr '
+        '           WHERE sr.schedule_id=schedules.id AND sr.run_id IS NOT NULL), '
+        'fail_count=(SELECT COUNT(*) FROM schedule_runs sr '
+        "            WHERE sr.schedule_id=schedules.id AND sr.run_id IS NOT NULL "
+        "            AND sr.status IN ('failed','interrupted','partial')), "
+        "last_status=CASE WHEN last_status='running' THEN 'interrupted' ELSE last_status END, "
+        "last_error=CASE WHEN last_status='running' THEN '面板服务重启导致本轮中断' "
+        '                ELSE last_error END')
     db.commit()
 
 
@@ -894,7 +904,11 @@ def record_schedule_run(sid, run_id, planned_at, started_at=None, status='runnin
 
 
 def finish_schedule_run(sid, run_id, status, note=''):
-    """测试跑完：回填定时任务与这一轮的状态。"""
+    """测试跑完：回填定时任务与这一轮的状态。
+
+    计数（运行轮数 / 失败轮数）以 schedule_runs 的实际记录为准重算，天然幂等：
+    重复回填同一轮不会把计数越加越大，中断的轮次也不会漏计。
+    """
     db = get_db()
     row = db.execute(
         'SELECT id FROM schedule_runs WHERE schedule_id=? AND run_id=? ORDER BY id DESC LIMIT 1',
@@ -902,17 +916,18 @@ def finish_schedule_run(sid, run_id, status, note=''):
     if row:
         db.execute('UPDATE schedule_runs SET status=?, note=? WHERE id=?', (status, note, row['id']))
     db.commit()
-    s = get_schedule(sid) or {}
-    fields = {
+    counts = db.execute(
+        'SELECT COUNT(*) AS n, '
+        "SUM(CASE WHEN status IN ('failed','interrupted','partial') THEN 1 ELSE 0 END) AS bad "
+        'FROM schedule_runs WHERE schedule_id=? AND run_id IS NOT NULL', (sid,)).fetchone()
+    update_schedule(sid, {
         'last_status': status,
         'last_run_at': _sql_now(),
         'last_run_id': run_id,
-        'run_count': int(s.get('run_count') or 0) + 1,
+        'run_count': int(counts['n'] or 0),
+        'fail_count': int(counts['bad'] or 0),
         'last_error': '' if status == 'finished' else note,
-    }
-    if status != 'finished':
-        fields['fail_count'] = int(s.get('fail_count') or 0) + 1
-    update_schedule(sid, fields)
+    })
     return get_schedule(sid)
 
 
@@ -920,6 +935,18 @@ def get_schedule_runs(sid, limit=200):
     rows = get_db().execute(
         'SELECT * FROM schedule_runs WHERE schedule_id=? ORDER BY id DESC LIMIT ?',
         (sid, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def pending_schedule_runs():
+    """还没回填结果的定时任务轮次（已启动、但测试还没收尾）。
+
+    用轮次表而不是 schedules.last_run_id：后者在「本轮跳过 / 等待空档」时指向的是
+    更早那一轮，用它回填会把计数重复累加。
+    """
+    rows = get_db().execute(
+        'SELECT schedule_id, run_id FROM schedule_runs '
+        "WHERE status='running' AND run_id IS NOT NULL ORDER BY id").fetchall()
     return [dict(r) for r in rows]
 
 
