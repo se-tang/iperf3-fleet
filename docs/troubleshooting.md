@@ -27,5 +27,6 @@ tail -20 /var/lib/iperf3-fleet/agent.log
 | 定时任务的「最近一轮」显示**本轮跳过 / 等待空档** | 触发时面板里已有测试在跑（手动或别的定时任务）。默认策略是跳过本轮并写下原因（不排队，避免长期对比的时间轴被推后）；勾上任务的「与手动测试冲突时等待」就会等空档再跑。 |
 | 定时任务一直**没跑起来**，最近一轮写着「机器已被删除 / 角色已不是…」 | 任务里选的目标机或后端机被删了，或角色被改成别的（例如把目标机改成了后端机）。到任务里编辑重新选机器即可；这类问题只跳过该轮，不会影响后面的排期。 |
 | 定时任务的「下一轮」显示**已中断** | 面板（容器）在那轮测试进行中被重启。排期不受影响，下一轮会按原计划继续；那轮的测试记录在「测试记录」里状态为失败并写明「面板服务重启导致测试中断」。 |
-| 想确认定时任务的参数或排期 | 面板列表里每行都写了参数与间隔；也可以直接查库：`docker compose exec iperf3-fleet python -c "from app import db;db.init_db();print(db.get_schedules())"`。 |
+| 想确认定时任务的参数或排期 | 面板列表里每行都写了参数与间隔；也可以直接查库（**务必只读**，见下一条）：`docker compose exec iperf3-fleet python -c "import sqlite3;c=sqlite3.connect('file:/data/panel.db?mode=ro',uri=True);print(list(c.execute('select id,name,next_run_at,last_status,run_count,fail_count from schedules')))"`。 |
+| 手工进去查库/调试时，**正在跑的测试或任务突然被判成「面板重启导致中断」** | 查库脚本里调用了 `db.init_db()` 或 `db.mark_stale_runs()`。`init_db()` 里带着「启动自愈」逻辑：它会把所有 running/pending 的测试标成失败、把排队任务写上一句「面板重启，任务作废」——**这是面板启动时该做的事，运行中调用等于自己制造故障**。诊断请用上面的只读连接（`mode=ro`），不要 import 面板模块后调 `init_db()`。 |
 | 安装脚本输出太少，想看到被收起的原始输出 | 加 `IPERF3_FLEET_VERBOSE=1` 重跑；或直接看日志文件（默认 `/tmp/iperf3-fleet-install.log`，`IPERF3_FLEET_LOG` 可改）。 |

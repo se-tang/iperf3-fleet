@@ -154,10 +154,6 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 
 
 def init_db():
-    # 诊断用：正常只在面板启动时调用一次。若运行中出现第二次调用，就说明有别的
-    # 代码路径在跑迁移，会把正在执行的测试/任务判成「面板重启」——把调用栈打出来。
-    import traceback as _tb
-    print('[dbg] init_db called\n' + ''.join(_tb.format_stack()[-6:]), flush=True)
     db = get_db()
     # 旧版 SSH 凭据表结构 → 直接重建（v2 起不再保存任何 SSH 信息）
     cols = [r['name'] for r in db.execute('PRAGMA table_info(machines)').fetchall()]
