@@ -100,8 +100,10 @@ summary{cursor:pointer;font-weight:600}
 .badge.scheduled{color:var(--accent);border-color:var(--accent)}
 .badge.waiting{color:var(--lime);border-color:var(--lime)}
 .badge.skipped,.badge.interrupted{color:var(--orange);border-color:var(--orange)}
-.sched-name{font-weight:600}
+.sched-name{font-weight:600;min-width:116px}
 .sched-actions{display:flex;gap:6px;flex-wrap:wrap}
+/* 机器名/间隔这类短词不该在中间断行（表格窄列下很显眼） */
+#schedulesBody td,#schedStatsBody td,#schedRoundsBody td,#machinesBody td{word-break:keep-all}
 #chartWrap{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px;overflow-x:auto}
 #chartWrap svg{display:block;min-width:640px;width:100%;height:auto}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:8px 0 0}
@@ -1098,10 +1100,11 @@ function intervalSeconds() {
 
 function humanDuration(sec) {
   sec = Number(sec) || 0;
-  if (sec % 86400 === 0) return `${sec / 86400} 天`;
-  if (sec % 3600 === 0) return `${sec / 3600} 小时`;
-  if (sec % 60 === 0) return `${sec / 60} 分钟`;
-  return `${sec} 秒`;
+  // 用不换行空格：表格窄列里「5 分钟」不该被拆成两行
+  if (sec % 86400 === 0) return `${sec / 86400}\u00a0天`;
+  if (sec % 3600 === 0) return `${sec / 3600}\u00a0小时`;
+  if (sec % 60 === 0) return `${sec / 60}\u00a0分钟`;
+  return `${sec}\u00a0秒`;
 }
 
 function schedStatusText(s) {

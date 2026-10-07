@@ -164,16 +164,17 @@ def schedule_summary(s):
 
 
 def _human_duration(sec):
+    """人话化的间隔文案。数字与单位之间用不换行空格，面板窄列里不会被拆行。"""
     sec = int(sec or 0)
     if sec <= 0:
         return '—'
     if sec % 86400 == 0:
-        return f'{sec // 86400} 天'
+        return f'{sec // 86400}\u00a0天'
     if sec % 3600 == 0:
-        return f'{sec // 3600} 小时'
+        return f'{sec // 3600}\u00a0小时'
     if sec % 60 == 0:
-        return f'{sec // 60} 分钟'
-    return f'{sec} 秒'
+        return f'{sec // 60}\u00a0分钟'
+    return f'{sec}\u00a0秒'
 
 
 def _human_delta(sec):
