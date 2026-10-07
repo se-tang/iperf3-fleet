@@ -7,20 +7,58 @@ set -e
 PANEL_URL="${1:-}"
 TOKEN="${2:-}"
 SIGN_KEY="${3:-}"
+
+# ---------------------------------------------------------------------------
+# 输出风格：与面板部署脚本一致（安静 + 进度 + 结论）
+#   管道 / CI 下自动退化为纯文本；NO_COLOR=1 可强制关闭颜色
+# ---------------------------------------------------------------------------
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && command -v tput >/dev/null 2>&1 \
+   && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ] 2>/dev/null; then
+  R="$(tput sgr0)"; B="$(tput bold)"; D="$(tput dim)"
+  GRN="$(tput setaf 2)"; YEL="$(tput setaf 3)"; RED="$(tput setaf 1)"
+  CYN="$(tput setaf 6)"; MAG="$(tput setaf 5)"
+else
+  R=""; B=""; D=""; GRN=""; YEL=""; RED=""; CYN=""; MAG=""
+fi
+ok()   { printf '  %s✓%s %s\n' "$GRN" "$R" "$*"; }
+warn() { printf '  %s!%s %s\n' "$YEL$B" "$R" "$*"; }
+fail() { printf '  %s✗%s %s\n' "$RED$B" "$R" "$*" >&2; }
+note() { printf '      %s%s%s\n' "$D" "$*" "$R"; }
+dot()  { printf '  %s▸%s ' "$CYN" "$R"; }
+rule() { printf '%s%s%s\n' "$D" "──────────────────────────────────────────────────────────────" "$R"; }
+
+usage() {
+  printf '\n'
+  printf '  %s%siperf3-fleet%s %s节点接入%s\n' "$B" "$MAG" "$R" "$D" "$R"
+  rule
+  printf '  用法: %scurl -fsSL <面板地址>/agent/install.sh | bash -s -- <面板地址> <接入令牌> <签名密钥>%s\n' "$D" "$R"
+  note '只有 wget 的机器：wget -qO- <面板地址>/agent/install.sh | bash -s -- <面板地址> <接入令牌> <签名密钥>'
+  printf '  %s接入命令请到面板「机器管理 → 接入命令」复制（每个令牌唯一）%s\n' "$D" "$R"
+  printf '\n'
+}
+
 if [ -z "$PANEL_URL" ] || [ -z "$TOKEN" ] || [ -z "$SIGN_KEY" ]; then
   if [ -n "$PANEL_URL" ] && [ -n "$TOKEN" ] && [ -z "$SIGN_KEY" ]; then
-    echo "❌ 检测到旧版接入命令（缺少第 3 个参数「签名密钥」）"
-    echo "   请回到面板 → 机器管理 → 「接入命令」，重新复制最新的接入命令后执行。"
+    fail "检测到旧版接入命令（缺少第 3 个参数「签名密钥」）"
+    note '请回到面板 → 机器管理 → 「接入命令」，重新复制最新的接入命令后执行。'
   else
-    echo "用法: curl -fsSL http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌 签名密钥"
-    echo "  （只有 wget 的机器：wget -qO- http://面板地址/agent/install.sh | bash -s -- http://面板地址 接入令牌 签名密钥）"
+    usage
   fi
   exit 1
 fi
 case "$PANEL_URL" in http://*|https://*) ;; *) PANEL_URL="http://$PANEL_URL" ;; esac
+HOSTNAME_S="$(hostname 2>/dev/null || echo '-')"
+
+printf '\n'
+printf '  %s%siperf3-fleet%s %s节点接入%s\n' "$B" "$MAG" "$R" "$D" "$R"
+rule
+printf '  %s主机%s   %s\n' "$D" "$R" "$HOSTNAME_S"
+printf '  %s面板%s   %s\n' "$D" "$R" "$PANEL_URL"
+rule
+printf '\n'
 
 if [ "$(id -u)" != "0" ]; then
-  echo "❌ 请使用 root 用户执行（或 sudo bash）"
+  fail "请使用 root 用户执行（或 sudo bash）"
   exit 1
 fi
 
@@ -33,7 +71,6 @@ pkg_mgr() {
 
 ensure_pkg() { # $1=命令 $2=包名(apt/dnf/yum/zypper) $3=包名(alpine) $4=可选的 rpm 包名覆盖
   command -v "$1" >/dev/null 2>&1 && return 0
-  echo "[install] 正在安装 $2 ..."
   _pm="$(pkg_mgr)"
   case "$_pm" in
     apt-get)
@@ -53,17 +90,27 @@ ensure_pkg() { # $1=命令 $2=包名(apt/dnf/yum/zypper) $3=包名(alpine) $4=�
   command -v "$1" >/dev/null 2>&1
 }
 
-if ! ensure_pkg curl curl curl; then
-  echo "❌ curl 安装失败，请手动安装后重试"
-  echo "   Debian/Ubuntu: apt-get update && apt-get install -y curl"
-  echo "   CentOS/RHEL/Rocky: yum install -y curl      Alpine: apk add curl"
-  exit 1
-fi
-if ! ensure_pkg openssl openssl openssl; then
-  echo "❌ openssl 安装失败（Agent 需要它校验任务签名）"
-  echo "   Debian/Ubuntu: apt-get install -y openssl   CentOS/RHEL: yum install -y openssl"
-  exit 1
-fi
+# ---- 依赖：curl / openssl（Agent 用 openssl 校验任务签名） ----
+for _tool in curl openssl; do
+  if command -v "$_tool" >/dev/null 2>&1; then
+    printf '  %s▸%s %s ... %s已安装%s\n' "$CYN" "$R" "$_tool" "$GRN" "$R"
+    continue
+  fi
+  dot; printf '%s ... ' "$_tool"
+  if ensure_pkg "$_tool" "$_tool" "$_tool"; then
+    printf '%s已安装%s\n' "$GRN" "$R"
+  else
+    printf '%s安装失败%s\n' "$RED$B" "$R"
+    if [ "$_tool" = "curl" ]; then
+      note 'Debian/Ubuntu: apt-get update && apt-get install -y curl'
+      note 'CentOS/RHEL/Rocky: yum install -y curl      Alpine: apk add curl'
+    else
+      note 'Debian/Ubuntu: apt-get install -y openssl   CentOS/RHEL: yum install -y openssl'
+    fi
+    fail "缺少 $_tool，无法继续"
+    exit 1
+  fi
+done
 
 mkdir -p /usr/local/lib/iperf3-fleet /etc/iperf3-fleet /var/lib/iperf3-fleet
 
@@ -180,6 +227,7 @@ while true; do
 done
 AGENT_EOF
 chmod 700 /usr/local/lib/iperf3-fleet/agent.sh
+printf '  %s▸%s 写入 Agent 程序 ... %s完成%s\n' "$CYN" "$R" "$GRN" "$R"
 
 cat > /etc/iperf3-fleet/agent.conf << CONF_EOF
 PANEL_URL='$PANEL_URL'
@@ -187,7 +235,11 @@ TOKEN='$TOKEN'
 SIGN_KEY='$SIGN_KEY'
 CONF_EOF
 chmod 600 /etc/iperf3-fleet/agent.conf
+printf '  %s▸%s 写入接入凭据 ... %s完成%s %s(仅 root 可读)%s\n' "$CYN" "$R" "$GRN" "$R" "$D" "$R"
 
+# ---- 常驻方式：systemd 优先，无 systemd 时退回 nohup + cron @reboot ----
+AGENT_MODE=""
+dot; printf '注册为常驻服务 ... '
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
   cat > /etc/systemd/system/iperf3-fleet-agent.service << 'UNIT_EOF'
 [Unit]
@@ -208,29 +260,53 @@ UNIT_EOF
   # 必须用 restart：重复安装时 enable --now 不会重启已运行的服务，
   # 会导致新令牌/签名密钥不生效、Agent 一直离线
   systemctl restart iperf3-fleet-agent
-  if ! systemctl is-active --quiet iperf3-fleet-agent; then
-    echo "❌ systemd 启动 agent 失败，请执行 journalctl -u iperf3-fleet-agent -n 20 查看原因"
+  if systemctl is-active --quiet iperf3-fleet-agent; then
+    AGENT_MODE="systemd"
+    printf '%s完成%s %s(systemd: iperf3-fleet-agent)%s\n' "$GRN" "$R" "$D" "$R"
+  else
+    printf '%s失败%s\n' "$RED$B" "$R"
+    note '查看原因：journalctl -u iperf3-fleet-agent -n 20'
+    fail "Agent 未能启动"
     exit 1
   fi
-  echo "✅ Agent 已安装并通过 systemd 启动（服务名: iperf3-fleet-agent）"
 else
   pkill -f "iperf3-fleet/agent.sh" 2>/dev/null || true
   (setsid nohup bash /usr/local/lib/iperf3-fleet/agent.sh >> /var/lib/iperf3-fleet/agent.log 2>&1 &)
   (crontab -l 2>/dev/null | grep -v "iperf3-fleet/agent.sh"
    echo "@reboot bash /usr/local/lib/iperf3-fleet/agent.sh >> /var/lib/iperf3-fleet/agent.log 2>&1") | crontab - 2>/dev/null || true
-  echo "✅ Agent 已安装并通过 nohup+cron 启动（未检测到 systemd）"
+  AGENT_MODE="nohup"
+  printf '%s完成%s %s(未检测到 systemd：nohup + cron @reboot)%s\n' "$GRN" "$R" "$D" "$R"
 fi
 
-echo "[install] 检查本机到面板的连通性..."
+# ---- 连通性自检：能访问面板才算接入成功 ----
+dot; printf '检查到面板的连通性 ... '
 if curl -fsS -m 5 "$PANEL_URL/api/health" >/dev/null 2>&1; then
-  echo "✅ 面板连通性正常"
+  printf '%s正常%s\n' "$GRN" "$R"
 else
-  echo "⚠️ 警告：本机访问不到面板 $PANEL_URL/api/health"
-  echo "   Agent 将无法上线！请在面板机放行该端口（防火墙/云安全组），"
-  echo "   然后执行: systemctl restart iperf3-fleet-agent"
+  printf '%s不通%s\n' "$RED$B" "$R"
+  printf '\n'
+  rule
+  fail "本机访问不到面板 $PANEL_URL"
+  note 'Agent 无法上线。请检查：'
+  note '  1) 面板机的防火墙 / 云安全组是否放行了该端口（含出方向的回包）'
+  note '  2) 面板地址是否可从公网访问（NAT / 反代场景要用对外那个地址）'
+  note "  3) 放行后重试：systemctl restart iperf3-fleet-agent"
+  rule
   exit 1
 fi
 
-echo "正在等待面板确认接入（约 3 秒）..."
+printf '  %s▸%s 等待面板确认接入 ... ' "$CYN" "$R"
 sleep 3
-echo "完成。回到面板刷新即可看到机器上线。"
+printf '%s完成%s\n' "$GRN" "$R"
+
+printf '\n'
+rule
+printf '  %s%s✓ 接入完成%s\n' "$B" "$GRN" "$R"
+printf '  %s主机%s   %s\n' "$D" "$R" "$HOSTNAME_S"
+printf '  %s面板%s   %s\n' "$D" "$R" "$PANEL_URL"
+printf '  %s守护%s   %s\n' "$D" "$R" "$([ "$AGENT_MODE" = "systemd" ] && echo 'systemd（开机自启，异常自动重启）' || echo 'nohup + cron @reboot')"
+printf '\n'
+printf '  %s下一步%s 回到面板刷新，机器应显示「在线」；随后即可把它选进测试或定时任务。\n' "$B" "$R"
+printf '  %s排障%s   机器本地日志 %s/var/lib/iperf3-fleet/agent.log%s\n' "$B" "$R" "$D" "$R"
+rule
+printf '\n'

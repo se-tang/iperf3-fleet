@@ -15,9 +15,9 @@ from urllib.parse import urlsplit
 from flask import Flask, Response, jsonify, redirect, render_template, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from . import db, quality, runner
+from . import db, quality, runner, scheduler
 
-APP_VERSION = '2.8.1'
+APP_VERSION = '2.9.0'
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
@@ -465,14 +465,135 @@ def api_status():
     return jsonify({'active_run_id': runner.active_run_id(), 'version': APP_VERSION})
 
 
+# ---------------- 定时任务（长期重复测试 + 跨轮对比） ----------------
+
+@app.get('/api/schedules')
+def api_schedules():
+    return jsonify([scheduler.schedule_summary(s) for s in db.get_schedules()])
+
+
+def _schedule_payload(data):
+    """先做参数校验（和手动测试同一套），再收敛定时任务自身的字段。"""
+    params = runner.normalize_params(data)
+    fields = scheduler.normalize_schedule(data)
+    fields.update({k: params[k] for k in ('streams', 'duration', 'port', 'ping_count',
+                                          'udp_bandwidth', 'ports')})
+    fields['udp'] = 1 if params['udp'] else 0
+    return fields
+
+
+@app.post('/api/schedules')
+def api_schedule_create():
+    data = request.get_json(force=True, silent=True) or {}
+    fields = _schedule_payload(data)
+    fields['next_run_at'] = scheduler.compute_next(fields['interval_seconds'])
+    s = db.create_schedule(fields)
+    return jsonify(scheduler.schedule_summary(s))
+
+
+@app.get('/api/schedules/<int:sid>')
+def api_schedule_get(sid):
+    s = db.get_schedule(sid)
+    if not s:
+        return jsonify({'error': '定时任务不存在'}), 404
+    out = scheduler.schedule_summary(s)
+    out['runs'] = db.get_schedule_runs(sid, limit=30)
+    runs = {r['id']: r for r in db.get_runs(limit=100)}
+    for sr in out['runs']:
+        r = runs.get(sr['run_id']) if sr['run_id'] else None
+        if r:
+            total, done, failed = db.run_counts(r['id'])
+            sr['run_status'] = r['status']
+            sr['done_count'] = done
+            sr['backend_total'] = total
+    return jsonify(out)
+
+
+@app.put('/api/schedules/<int:sid>')
+def api_schedule_update(sid):
+    if not db.get_schedule(sid):
+        return jsonify({'error': '定时任务不存在'}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    fields = _schedule_payload(data)
+    # 间隔变了就按新间隔重排下一次；否则保留原有排队时间（避免改个名字就重置周期）
+    old = db.get_schedule(sid)
+    if int(fields['interval_seconds']) != int(old.get('interval_seconds') or 0):
+        fields['next_run_at'] = scheduler.compute_next(fields['interval_seconds'])
+    elif not old.get('next_run_at'):
+        fields['next_run_at'] = scheduler.compute_next(fields['interval_seconds'])
+    s = db.update_schedule(sid, fields)
+    return jsonify(scheduler.schedule_summary(s))
+
+
+@app.delete('/api/schedules/<int:sid>')
+def api_schedule_delete(sid):
+    if not db.get_schedule(sid):
+        return jsonify({'error': '定时任务不存在'}), 404
+    db.delete_schedule(sid)
+    return jsonify({'ok': True})
+
+
+@app.post('/api/schedules/<int:sid>/toggle')
+def api_schedule_toggle(sid):
+    s = db.get_schedule(sid)
+    if not s:
+        return jsonify({'error': '定时任务不存在'}), 404
+    want = not s['enabled']
+    fields = {'enabled': 1 if want else 0}
+    # 重新启用时从「现在」开始计时，避免停用很久后立刻触发一串积压的轮次
+    if want:
+        fields['next_run_at'] = scheduler.compute_next(s['interval_seconds'])
+    s = db.update_schedule(sid, fields)
+    return jsonify(scheduler.schedule_summary(s))
+
+
+@app.post('/api/schedules/<int:sid>/run-now')
+def api_schedule_run_now(sid):
+    if not db.get_schedule(sid):
+        return jsonify({'error': '定时任务不存在'}), 404
+    ok, note = scheduler.trigger(sid, manual=True)
+    if not ok:
+        return jsonify({'error': note}), 400
+    return jsonify({'ok': True, 'note': note})
+
+
+@app.get('/api/schedules/<int:sid>/comparison')
+def api_schedule_comparison(sid):
+    if not db.get_schedule(sid):
+        return jsonify({'error': '定时任务不存在'}), 404
+    return jsonify(scheduler.comparison_data(sid))
+
+
+@app.get('/api/schedules/<int:sid>/report')
+def api_schedule_report(sid):
+    s = db.get_schedule(sid)
+    if not s:
+        return jsonify({'error': '定时任务不存在'}), 404
+    return Response(
+        scheduler.build_comparison_report(sid),
+        mimetype='text/markdown; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename=iperf3-longrun-{sid}.md'})
+
+
 @app.errorhandler(ValueError)
 def handle_value_error(e):
     return jsonify({'error': str(e)}), 400
 
 
+@app.errorhandler(RuntimeError)
+def handle_runtime_error(e):
+    """参数/状态类错误统一转成 400 并把原因原样带回前端。
+
+    这些错误都是「用户填错了」或「现在不能这么做」（参数越界、机器离线、
+    面板已有测试在跑……），消息本身就是给用户看的操作指引。
+    """
+    return jsonify({'error': str(e) or '请求无法完成'}), 400
+
+
 if __name__ == '__main__':
     db.init_db()
     runner.start_discovery_worker()
+    scheduler.start_scheduler()
     from waitress import serve
     # clear_untrusted_proxy_headers=False：保留 X-Forwarded-For 交给 _client_ip()
     # 按规则采信（仅反代/内网来源），否则经 Caddy 接入的 Agent 真实 IP 会被剥离

@@ -24,3 +24,8 @@ tail -20 /var/lib/iperf3-fleet/agent.log
 | 面板打不开 | `docker compose ps` 看容器状态与健康检查；`docker compose logs --tail 50 iperf3-fleet`。 |
 | Caddy 证书签不下来 | 域名 A 记录是否指向本机、安全组是否放行 80/443、80 是否被别的服务占用；`docker compose --profile tls logs --tail 30 caddy`。 |
 | 面板容器反复重启 | 常见是端口冲突（改 `.env` 的 `PANEL_PORT` 后 `docker compose up -d`）或磁盘空间不足。 |
+| 定时任务的「最近一轮」显示**本轮跳过 / 等待空档** | 触发时面板里已有测试在跑（手动或别的定时任务）。默认策略是跳过本轮并写下原因（不排队，避免长期对比的时间轴被推后）；勾上任务的「与手动测试冲突时等待」就会等空档再跑。 |
+| 定时任务一直**没跑起来**，最近一轮写着「机器已被删除 / 角色已不是…」 | 任务里选的目标机或后端机被删了，或角色被改成别的（例如把目标机改成了后端机）。到任务里编辑重新选机器即可；这类问题只跳过该轮，不会影响后面的排期。 |
+| 定时任务的「下一轮」显示**已中断** | 面板（容器）在那轮测试进行中被重启。排期不受影响，下一轮会按原计划继续；那轮的测试记录在「测试记录」里状态为失败并写明「面板服务重启导致测试中断」。 |
+| 想确认定时任务的参数或排期 | 面板列表里每行都写了参数与间隔；也可以直接查库：`docker compose exec iperf3-fleet python -c "from app import db;db.init_db();print(db.get_schedules())"`。 |
+| 安装脚本输出太少，想看到被收起的原始输出 | 加 `IPERF3_FLEET_VERBOSE=1` 重跑；或直接看日志文件（默认 `/tmp/iperf3-fleet-install.log`，`IPERF3_FLEET_LOG` 可改）。 |

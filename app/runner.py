@@ -258,7 +258,13 @@ def proto_name(ip_version):
     return 'IPv6' if int(ip_version or 4) == 6 else 'IPv4'
 
 
-def start_run(target_id, backend_ids, ip_version=4, params=None):
+def start_run(target_id, backend_ids, ip_version=4, params=None,
+              source='manual', schedule_id=None, label=''):
+    """创建并异步启动一次测试。
+
+    source / schedule_id / label 用于区分「手动测试」与「定时任务触发的测试」，
+    定时任务的每轮结果要靠它们回填到对应的对比曲线里。
+    """
     cfg = normalize_params(params)
     ip_version = 6 if int(ip_version or 4) == 6 else 4
     proto = proto_name(ip_version)
@@ -287,8 +293,11 @@ def start_run(target_id, backend_ids, ip_version=4, params=None):
             if m['role'] != 'backend':
                 raise RuntimeError(f'机器「{m["name"]}」的角色不是「后端机器」，不能作为后端参加测试')
         run_id = db.create_run(target, backend_ids, ip_version, target_host=target_ip,
-                               **cfg)
+                               source=source, schedule_id=schedule_id, **cfg)
         _active[run_id] = {'stop': False, 'log': []}
+        if label:
+            _active[run_id]['log'].append(
+                f"[{time.strftime('%H:%M:%S')}] === 本次测试由{label}触发 ===")
     threading.Thread(target=_worker, args=(run_id, target, ip_version), daemon=True).start()
     return run_id
 
