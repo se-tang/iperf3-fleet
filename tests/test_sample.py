@@ -1044,7 +1044,7 @@ def test_schedule_trigger_flow():
                                       'name': '触发用例', 'interval_seconds': 600}),
         next_run_at=scheduler.compute_next(600)))
 
-    # 1) 正常触发：真正创建了 run（手动测试同一套校验/落库），来源标记为 schedule
+    # 1) 正常触发：真正走到「建测试记录」这一步（真实代码路径），只是不启动执行线程
     started = {}
     real_start_run = runner.start_run
 
@@ -1052,7 +1052,11 @@ def test_schedule_trigger_flow():
                        source='manual', schedule_id=None, label=''):
         started.update(target_id=target_id, backend_ids=backend_ids, ip_version=ip_version,
                        params=params, source=source, schedule_id=schedule_id, label=label)
-        return 4242
+        # 不启动执行线程，避免真去连 Agent；但记录本身要真的建出来，
+        # 否则 finish_pending 会因为「测试记录不存在」把这一轮算成失败
+        return db.create_run(db.get_machine(target_id), backend_ids, ip_version,
+                             target_host='93.184.216.34', source=source,
+                             schedule_id=schedule_id, **params)
 
     runner.start_run = fake_start_run
     try:
@@ -1063,23 +1067,33 @@ def test_schedule_trigger_flow():
     finally:
         runner.start_run = real_start_run
     s = db.get_schedule(sch['id'])
-    assert s['last_run_id'] == 4242 and s['last_status'] == 'running', s
+    assert s['last_status'] == 'running' and s['last_run_id'], s
     assert s['next_run_at'] > scheduler.now_str(), s           # 触发后立刻推下一次，避免重复触发
-    assert db.get_schedule_runs(sch['id'])[0]['run_id'] == 4242
+    assert db.get_schedule_runs(sch['id'])[0]['run_id'] == s['last_run_id']
 
     # 2) 完成回填：run 跑完后把状态写回定时任务与这一轮
-    rid = db.create_run(t, [b['id']], 4, target_host='93.184.216.34', source='schedule',
-                        schedule_id=sch['id'], port=5201, streams=1, duration=1,
-                        udp=False, udp_bandwidth='100M', ping_count=1)
+    rid = s['last_run_id']
     db.update_run(rid, status='finished')
-    db.update_schedule(sch['id'], {'last_run_id': rid, 'last_status': 'running'})
-    db.record_schedule_run(sch['id'], rid, scheduler.now_str(), status='running')
+    db.update_schedule(sch['id'], {'last_status': 'running'})
     scheduler.finish_pending()
     s = db.get_schedule(sch['id'])
     assert s['last_status'] == 'finished' and s['run_count'] == 1, s
     assert s['last_error'] == '', s
     sr = [x for x in db.get_schedule_runs(sch['id']) if x['run_id'] == rid][0]
     assert sr['status'] == 'finished', sr
+
+    # 2b) 回填必须幂等：同一轮不能被计两次（轮次记录一旦收尾就不再是 pending）
+    before = db.get_schedule(sch['id'])['run_count']
+    scheduler.finish_pending()
+    scheduler.finish_pending()
+    s = db.get_schedule(sch['id'])
+    assert s['run_count'] == before and s['fail_count'] == 0, s
+    assert [x for x in db.pending_schedule_runs() if x['schedule_id'] == sch['id']] == []
+
+    # 2c) 跳过 / 等待之后 last_run_id 会指向更早那一轮，不能被当成待回填的轮次
+    db.update_schedule(sch['id'], {'last_status': 'waiting'})
+    scheduler.finish_pending()
+    assert db.get_schedule(sch['id'])['run_count'] == before, db.get_schedule(sch['id'])
 
     # 3) 与手动测试冲突：默认跳过本轮，且原因写在面板能看到的地方
     runner._active[999999] = {'stop': False, 'log': []}      # 模拟「有测试在跑」
@@ -1127,6 +1141,7 @@ def test_schedule_restart_recovery():
     db.record_schedule_run(sch['id'], 777, '2026-01-01 00:00:00', status='running')
 
     db.mark_stale_runs()                      # 等价于面板进程重启时的自愈
+    scheduler.finish_pending()
     s = db.get_schedule(sch['id'])
     assert s['enabled'] == 1, s
     assert s['last_status'] == 'interrupted', s
@@ -1136,6 +1151,26 @@ def test_schedule_restart_recovery():
 
     # 已经过点的任务会在下一次 tick 被选中（重启后继续按原计划跑）
     assert any(x['id'] == sch['id'] for x in db.due_schedules()), db.due_schedules()
+
+    # 被中断的轮次要计入失败，并且不能出现「完成 N 轮却一次都没跑成」的错账
+    rid = db.create_run(t, [b['id']], 4, target_host='93.184.216.34', source='schedule',
+                        schedule_id=sch['id'], port=5201, streams=1, duration=1,
+                        udp=False, udp_bandwidth='100M', ping_count=1)
+    db.record_schedule_run(sch['id'], rid, scheduler.now_str(), status='running')
+    db.mark_stale_runs()                       # 面板重启：这一轮被判定中断，
+    #                                           记账也在这一步完成（一旦标成 interrupted
+    #                                           就没有「待回填」的入口了，不在这里记就会漏轮次）
+    scheduler.finish_pending()
+    s = db.get_schedule(sch['id'])
+    sr = [x for x in db.get_schedule_runs(sch['id']) if x['run_id'] == rid][0]
+    assert sr['status'] == 'interrupted', sr
+    # 记账从轮次记录重算：这个任务历史上有两轮（初始那轮 + 这一轮），两轮都是中断
+    assert s['run_count'] == 2 and s['fail_count'] == 2, s
+    assert '中断' in s['last_error'], s
+    # 幂等：再重启一次计数不会继续涨
+    db.mark_stale_runs()
+    s2 = db.get_schedule(sch['id'])
+    assert s2['run_count'] == s['run_count'] and s2['fail_count'] == s['fail_count'], s2
     db.delete_schedule(sch['id'])
     print('定时任务重启恢复 OK')
 
