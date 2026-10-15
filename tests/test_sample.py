@@ -1235,6 +1235,46 @@ def test_schedule_comparison_report():
     print('长期对比数据 / 趋势 / Markdown 报告 OK')
 
 
+def test_version_sync():
+    """版本号必须写在一处：app.py 是唯一权威，install.sh 里的值只用于「全新安装」开场。
+
+    这三处一旦漂移，用户就会看到「部署脚本说 vX，面板里显示 vY」，所以用测试钉住。
+    """
+    import re as _re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def read(path):
+        with open(os.path.join(root, path), encoding='utf-8') as f:
+            return f.read()
+
+    app_py = read('app/app.py')
+    m = _re.search(r"^APP_VERSION\s*=\s*'([^']+)'", app_py, _re.M)
+    assert m, 'app/app.py 里找不到 APP_VERSION'
+    ver = m.group(1)
+    assert _re.match(r'^\d+\.\d+\.\d+$', ver), ver
+    # 测试阶段用 0.x 版本
+    assert ver.startswith('0.'), f'测试阶段应保持 0.x 版本，当前 {ver}'
+
+    inst = read('install.sh')
+    m2 = _re.search(r'^APP_VERSION="([^"]+)"', inst, _re.M)
+    assert m2, 'install.sh 里找不到 APP_VERSION'
+    assert m2.group(1) == ver, f'install.sh({m2.group(1)}) 与 app.py({ver}) 版本不一致'
+
+    # 面板横幅不再自己维护版本，而是从 app.py 读
+    banner = read('banner.py')
+    assert 'def app_version()' in banner, 'banner.py 应复用 app.py 的版本号'
+    assert "APP_VERSION" in banner and 're.search' in banner, banner[:200]
+
+    # 自动更新的关键实现必须在场：检查更新 / 强制对齐 / 用新脚本重跑
+    for key in ('IPERF3_FLEET_REEXEC', 'IPERF3_FLEET_UPDATED',
+                'checkout -q -B "$BRANCH" "origin/$BRANCH"',
+                'IPERF3_FLEET_DRY_RUN'):
+        assert key in inst, f'install.sh 缺少自动更新关键片段：{key}'
+    assert 'git pull --ff-only' not in inst, \
+        '不该再用 git pull --ff-only：远端历史被重写（force push）时会直接失败'
+    print(f'版本号唯一来源 / 自动更新关键实现 OK（v{ver}）')
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
@@ -1258,4 +1298,5 @@ if __name__ == '__main__':
     test_schedule_trigger_flow()
     test_schedule_restart_recovery()
     test_schedule_comparison_report()
+    test_version_sync()
     print('\nALL TESTS PASSED')

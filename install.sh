@@ -29,7 +29,9 @@ set -u
 umask 022
 
 APP_NAME="iperf3-fleet"
-APP_VERSION="2.9.0"
+# 当前版本：与 app/app.py 的 APP_VERSION 保持一致（app.py 是唯一权威）。
+# 升级时脚本会用「更新后的代码里」的版本号自我重跑，所以这里的值只对「全新安装」生效。
+APP_VERSION="0.2.9"
 REPO_URL="${IPERF3_FLEET_REPO_URL:-https://github.com/se-tang/iperf3-fleet.git}"
 BRANCH="${IPERF3_FLEET_BRANCH:-main}"
 INSTALL_DIR="${IPERF3_FLEET_DIR:-$HOME/iperf3-fleet}"
@@ -263,12 +265,49 @@ fetch() { # $1=url $2=输出文件
 }
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # 开场：一眼看清「这是什么 / 在哪台机器上做什么」
 # ---------------------------------------------------------------------------
 : >"$LOG_FILE" 2>/dev/null || LOG_FILE=/dev/null
+
+# 先做「检查更新」再印开场：走 curl | bash 时手里的是旧脚本，
+# 若一上来就打印版本号，更新完成后版本号会对不上（显示的是旧版本）。
+# 这里只做更新，输出全部进日志；失败/无更新都静默放过，不打断后面的安装流程。
+if [ "${IPERF3_FLEET_REEXEC:-0}" != "1" ] && have git; then
+  # 从仓库目录里直接执行本脚本时，同样按该目录检查更新
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    _sd="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -f "$_sd/docker-compose.yml" ] && [ -d "$_sd/.git" ]; then INSTALL_DIR="$_sd"; fi
+  fi
+fi
+if [ "${IPERF3_FLEET_REEXEC:-0}" != "1" ] && [ -d "$INSTALL_DIR/.git" ] && have git; then
+  _cur_url="$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)"
+  if [ -n "$_cur_url" ] && [ "$_cur_url" != "$REPO_URL" ]; then
+    git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" >>"$LOG_FILE" 2>&1 || true
+  fi
+  if git -C "$INSTALL_DIR" fetch --prune origin "$BRANCH" >>"$LOG_FILE" 2>&1; then
+    _l="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo '')"
+    _r="$(git -C "$INSTALL_DIR" rev-parse "origin/$BRANCH" 2>/dev/null || echo '')"
+    if [ -n "$_r" ] && [ "$_l" != "$_r" ] \
+       && [ -z "$(git -C "$INSTALL_DIR" status --porcelain 2>/dev/null)" ]; then
+      git -C "$INSTALL_DIR" checkout -q -B "$BRANCH" "origin/$BRANCH" >>"$LOG_FILE" 2>&1 \
+        || git -C "$INSTALL_DIR" reset --hard -q "origin/$BRANCH" >>"$LOG_FILE" 2>&1 || true
+      if [ -f "$INSTALL_DIR/install.sh" ]; then
+        # 通知重跑后的脚本「本轮是刚更新上来的」，这样它的那行结论会说
+        # 「发现新版本 → 已自动更新」，而不是「已是最新」（否则用户以为没生效）
+        export IPERF3_FLEET_REEXEC=1 IPERF3_FLEET_UPDATED=1
+        export IPERF3_FLEET_DIR="$INSTALL_DIR" IPERF3_FLEET_LOG="$LOG_FILE"
+        exec bash "$INSTALL_DIR/install.sh" "$@"
+      fi
+    fi
+  fi
+fi
+
 printf '\n'
+# 版本号优先取「当前代码里的」（app.py 是唯一权威），取不到才用脚本内置值
+_ver_hdr="$(sed -n "s/^APP_VERSION = '\(.*\)'/\1/p" "$INSTALL_DIR/app/app.py" 2>/dev/null | head -n1)"
 printf '  %s%s%s %s%s 面板一键部署%s\n' "$C_BOLD$C_MAGENTA" "$APP_NAME" "$C_RESET" \
-  "$C_DIM" "v$APP_VERSION" "$C_RESET"
+  "$C_DIM" "v${_ver_hdr:-$APP_VERSION}" "$C_RESET"
 printf '  %s多机 iperf3 线路质量测试：目标机 + 后端机，逐台测速并生成评价报告%s\n' "$C_DIM" "$C_RESET"
 _rule '─'
 printf '  %s主机%s   %s%s%s (%s)\n' "$C_DIM" "$C_RESET" "$C_BOLD" "$(hostname 2>/dev/null || echo '-')" "$C_RESET" "$OS_PRETTY"
@@ -439,7 +478,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 自检 4/5：获取代码（脚本本身就在仓库里时直接使用当前目录）
+# 自检 4/5：获取代码 / 检查更新
+#   同一个一键命令兼顾两种机器：
+#     · 没装过 → 克隆仓库（git 不可用时退回源码包）
+#     · 装过   → 比较本地与远端，有更新就直接更新（含历史被重写过的情况）
 # ---------------------------------------------------------------------------
 step "获取代码"
 SELF_DIR=""
@@ -450,21 +492,76 @@ if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/docker-compose.yml" ] && [ -d "$SELF_DI
   INSTALL_DIR="$SELF_DIR"
 fi
 
+UPDATED=0        # 这次运行是否刚更新过代码（用于收尾文案）
+REPO_LINKED=0    # INSTALL_DIR 是否是一个 git 仓库
+
+repo_dirty() {
+  [ -n "$(git -C "$INSTALL_DIR" status --porcelain 2>/dev/null)" ]
+}
+
+# 让已有目录指向本脚本配置的仓库地址（换过仓库 / 从源码包安装过的都能一次性纠正）
+ensure_origin() {
+  _cur="$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)"
+  if [ "$_cur" != "$REPO_URL" ]; then
+    if [ -n "$_cur" ]; then
+      git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" >>"$LOG_FILE" 2>&1 || true
+    else
+      git -C "$INSTALL_DIR" remote add origin "$REPO_URL" >>"$LOG_FILE" 2>&1 || true
+    fi
+  fi
+}
+
 fetch_repo() {
   if [ -d "$INSTALL_DIR/.git" ]; then
-    log_file "更新已有仓库：git -C $INSTALL_DIR pull --ff-only"
-    git -C "$INSTALL_DIR" pull --ff-only >>"$LOG_FILE" 2>&1 || \
-      warn "git pull 失败（可能存在本地改动），继续用当前代码部署"
+    REPO_LINKED=1
+    ensure_origin
+    log_file "检查更新：git -C $INSTALL_DIR fetch origin $BRANCH"
+    if ! git -C "$INSTALL_DIR" fetch --prune origin "$BRANCH" >>"$LOG_FILE" 2>&1; then
+      warn "连不上仓库，跳过更新检查，继续用当前代码部署"
+      return 0
+    fi
+    _local="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo '')"
+    _remote="$(git -C "$INSTALL_DIR" rev-parse "origin/$BRANCH" 2>/dev/null || echo '')"
+    if [ -n "$_remote" ] && [ "$_local" = "$_remote" ]; then
+      if [ "${IPERF3_FLEET_UPDATED:-0}" = "1" ]; then
+        CODE_STATE=updated       # 本轮的更新是在「重跑前」那一段完成的
+      else
+        CODE_STATE=current
+      fi
+      return 0
+    fi
+    if repo_dirty; then
+      # 本地有改动绝不 reset（会静默丢东西）：提示清楚，按现状部署
+      CODE_STATE=dirty
+      return 0
+    fi
+    log_file "更新到 origin/$BRANCH（本地 $_local → $_remote）"
+    if git -C "$INSTALL_DIR" checkout -q -B "$BRANCH" "origin/$BRANCH" >>"$LOG_FILE" 2>&1 \
+       || git -C "$INSTALL_DIR" reset --hard -q "origin/$BRANCH" >>"$LOG_FILE" 2>&1; then
+      # 用 fetch + 强制对齐，而不是 git pull：远端历史被重写过（force push）时
+      # pull --ff-only 会直接失败，用户就看到「有更新但升不动」
+      CODE_STATE=updated
+      UPDATED=1
+      return 0
+    fi
+    warn "代码更新失败，继续用当前代码部署"
+    CODE_STATE=stale
     return 0
   fi
   if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
-    warn "$INSTALL_DIR 已存在且不是 git 仓库，直接使用该目录"
+    warn "$INSTALL_DIR 已存在且不是 git 仓库，直接使用该目录（升级请重新 git clone）"
+    CODE_STATE=plain
     return 0
   fi
+  # 全新安装
   mkdir -p "$(dirname "$INSTALL_DIR")" 2>/dev/null || true
   if have git; then
     log_file "克隆仓库 $REPO_URL（分支 $BRANCH）"
-    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" >>"$LOG_FILE" 2>&1 && return 0
+    if git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" >>"$LOG_FILE" 2>&1; then
+      REPO_LINKED=1
+      CODE_STATE=fresh
+      return 0
+    fi
     warn "git clone 失败 → 改用源码包"
   fi
   [ -n "$TARBALL_URL" ] || return 1
@@ -478,18 +575,41 @@ fetch_repo() {
   cp -a "$_src/." "$INSTALL_DIR/" || { rm -f "$_tmp"; rm -rf "$_dir"; return 1; }
   rm -f "$_tmp"
   rm -rf "$_dir"
+  CODE_STATE=tarball
   [ -f "$INSTALL_DIR/docker-compose.yml" ]
 }
 
+CODE_STATE=unknown
 if [ -d "$INSTALL_DIR/.git" ] && [ "$SELF_DIR" = "$INSTALL_DIR" ]; then
   step_note "脚本位于仓库目录内，直接使用：$INSTALL_DIR"
 fi
 
-if run_quiet fetch_repo; then
-  _ver="$(sed -n "s/^APP_VERSION = '\(.*\)'/\1/p" "$INSTALL_DIR/app/app.py" 2>/dev/null | head -n1)"
-  step_done "就绪${_ver:+（代码版本 v$_ver）} → $INSTALL_DIR"
-else
+if ! run_quiet fetch_repo; then
   die "获取代码失败：请检查机器能否访问 $REPO_URL（被墙可设 https_proxy 后重试）"
+fi
+
+code_version() {
+  sed -n "s/^APP_VERSION = '\(.*\)'/\1/p" "$INSTALL_DIR/app/app.py" 2>/dev/null | head -n1
+}
+CODE_VER="$(code_version)"
+case "$CODE_STATE" in
+  fresh)   step_done "已克隆仓库${CODE_VER:+（v$CODE_VER）} → $INSTALL_DIR" ;;
+  tarball) step_done "已下载源码包${CODE_VER:+（v$CODE_VER）} → $INSTALL_DIR" ;;
+  current) step_done "已是最新${CODE_VER:+（v$CODE_VER）}（远端无新提交）" ;;
+  updated) step_done "发现新版本 → 已自动更新${CODE_VER:+（v$CODE_VER）}" ;;
+  dirty)   step_done "有本地改动，跳过自动更新${CODE_VER:+（按当前代码 v$CODE_VER 部署）}"
+           step_note "想恢复官方版本：cd $INSTALL_DIR && git checkout -- . && 重跑本脚本" ;;
+  plain)   step_done "使用现有目录${CODE_VER:+（v$CODE_VER）}（非 git 仓库，不支持自动更新）" ;;
+  *)       step_done "就绪${CODE_VER:+（v$CODE_VER）} → $INSTALL_DIR" ;;
+esac
+
+# 走管道那条命令（curl | bash）时，脚本本体是「旧的那一份」：更新完代码后
+# 用更新后的脚本重新执行一次，保证本次部署用的也是最新逻辑（只重跑一次）
+if [ "$UPDATED" = "1" ] && [ "${IPERF3_FLEET_REEXEC:-0}" != "1" ] && [ -f "$INSTALL_DIR/install.sh" ]; then
+  step_note "用更新后的脚本继续本次部署…"
+  export IPERF3_FLEET_REEXEC=1 IPERF3_FLEET_DIR="$INSTALL_DIR"
+  export IPERF3_FLEET_LOG="$LOG_FILE"
+  exec bash "$INSTALL_DIR/install.sh"
 fi
 
 # ---------------------------------------------------------------------------
@@ -533,6 +653,17 @@ case "${PANEL_BIND:-}" in
   "" | 0.0.0.0 | 127.0.0.1 | "::" | "[::]") ;;
   *) HEALTH_HOST="$PANEL_BIND" ;;
 esac
+
+# 只检查/更新代码，不部署（想确认更新结果、或先看参数再用）：
+#   curl -fsSL .../install.sh | IPERF3_FLEET_DRY_RUN=1 bash
+if [ "${IPERF3_FLEET_DRY_RUN:-0}" = "1" ]; then
+  printf '\n'
+  printf '  %s--dry-run：只检查/更新代码，不部署面板（当前代码 v%s）- %s\n' \
+    "$C_DIM" "${CODE_VER:-$APP_VERSION}" "$C_RESET"
+  printf '  %s需要部署时去掉 IPERF3_FLEET_DRY_RUN=1 重跑即可%s\n' "$C_DIM" "$C_RESET"
+  printf '\n'
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # 部署（自动识别是否需要带 tls profile，避免升级时把 caddy 丢了）
@@ -631,7 +762,7 @@ PANEL_PW="$(_banner_field '登录密码')"
 printf '\n'
 _rule '─'
 printf '  %s%s✓ 部署完成%s\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
-printf '  %s%s%s\n' "$C_DIM" "$APP_NAME v$APP_VERSION · 面板已就绪并随 Docker 自启" "$C_RESET"
+printf '  %s%s v%s · 面板已就绪并随 Docker 自启%s\n' "$C_DIM" "$APP_NAME" "${CODE_VER:-$APP_VERSION}" "$C_RESET"
 _rule '─'
 printf '\n'
 printf '  %s面板地址%s  %s%shttp://%s:%s%s\n' "$C_BOLD" "$C_RESET" "$C_BOLD$C_CYAN" "" "$PANEL_IP" "$PANEL_PORT" "$C_RESET"
@@ -657,9 +788,10 @@ printf '    3. 复制生成的接入命令，到对应机器的 root 下执行�
 printf '    4. 回到面板选择目标机与后端机 → 开始测试，或在「定时任务」里挂长期对比\n'
 printf '\n'
 printf '  %s维护命令%s\n' "$C_BOLD" "$C_RESET"
-printf '    %s升级%s  cd %s && git pull && docker compose %sup -d --build\n' \
+printf '    %s升级%s  重跑本脚本即可（自动检查更新，有新版本会自己更新并重建）：\n' "$C_DIM" "$C_RESET"
+printf '          curl -fsSL https://raw.githubusercontent.com/se-tang/%s/main/install.sh | bash\n' "$APP_NAME"
+printf '    %s日志%s  cd %s && docker compose %slogs -f --tail 100 iperf3-fleet\n' \
   "$C_DIM" "$C_RESET" "$INSTALL_DIR" "$COMPOSE_ARGS"
-printf '    %s日志%s  docker compose %slogs -f --tail 100 iperf3-fleet\n' "$C_DIM" "$C_RESET" "$COMPOSE_ARGS"
 printf '    %s卸载%s  cd %s && docker compose %sdown && rm -rf data .env\n' \
   "$C_DIM" "$C_RESET" "$INSTALL_DIR" "$COMPOSE_ARGS"
 printf '    %s安装日志%s  %s\n' "$C_DIM" "$C_RESET" "$LOG_FILE"

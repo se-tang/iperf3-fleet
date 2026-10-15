@@ -17,7 +17,9 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import db, quality, runner, scheduler
 
-APP_VERSION = '2.9.0'
+# 版本号：这是唯一权威（面板页面、部署横幅、install.sh 都从/沿用它取）。
+# 还在测试阶段，因此用 0.x 版本号。
+APP_VERSION = '0.2.9'
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
