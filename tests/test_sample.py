@@ -657,7 +657,7 @@ def test_machine_addr_override():
     c = flask_app.test_client()
     _login(c)
 
-    # 建机器时带手动地址
+    # 建机器时带手动地址（用 RFC 5737 文档地址，别把真实 IP 写进测试数据）
     r = c.post('/api/machines', json={'name': 'nat-t', 'role': 'target', 'region': '德国',
                                       'bandwidth': '1G', 'addr_override': '203.0.113.10'})
     assert r.status_code == 200, r.get_json()

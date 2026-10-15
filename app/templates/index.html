@@ -303,7 +303,9 @@ kbd{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;p
         <div class="field"><label>带宽标记（如 500M / 1G / 不限）</label><input id="mBandwidth" placeholder="500M"/></div>
       </div>
       <div class="field"><label>手动测试地址（可选，留空 = 自动探测）</label>
-        <input id="mAddr" placeholder="如 203.0.113.10；NAT / 反代后面板观测到的地址不对时填死真实地址"/>
+        <input id="mAddr" placeholder="如 203.0.113.10（示例地址，请填该机器的真实 IP）"
+               title="留空即自动：面板按心跳来源与本机探测结果确定测试地址。只有在 NAT / CDN 反代后面板观测到的地址不对时，才需要在这里填死真实 IP。"/>
+        <span class="muted" style="font-size:11px">留空即自动识别；只有自动识别到的地址不对时才需要手填。</span>
       </div>
       <p class="hint" id="mRoleHint"></p>
       <p class="hint">不保存任何 SSH 凭据；保存后复制接入命令到机器执行即可。接入后自动探测本机 IPv4 / IPv6 地址（用于选择测试协议），无需手动填写。</p>
