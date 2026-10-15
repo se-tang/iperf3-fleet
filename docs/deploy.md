@@ -13,7 +13,7 @@
 要点：
 
 - **安装输出是给人看的**：每一步一行（`▸ 步骤 ... 结果 (耗时)`），耗时的第三方命令（装 Docker、构建镜像）只显示 spinner + 已用秒数，它们的刷屏输出全部写进日志文件（默认 `/tmp/iperf3-fleet-install.log`，可用 `IPERF3_FLEET_LOG` 改）。失败时自动回显日志末尾 6–10 行，不必再翻屏找原因；想看到全部原始输出就加 `IPERF3_FLEET_VERBOSE=1`。管道 / CI 环境下自动退化为纯文本（无颜色、无 spinner 刷新）。
-- **可重复执行**：再次运行等于升级（`git pull` + 重新构建），数据、端口、机器接入关系全部保留；之前用过 HTTPS 会自动带上 `--profile tls`，不会把 caddy 弄丢，并顺手清理被误挂载成目录的 `Caddyfile.local`。升级时不会重复显示初始密码（避免误导）。
+- **可重复执行**：再次运行就是升级（自动检查更新 → 有更新才重建），数据、端口、机器接入关系全部保留；之前用过 HTTPS 会自动带上 `--profile tls`，不会把 caddy 弄丢，并顺手清理被误挂载成目录的 `Caddyfile.local`。升级时不会重复显示初始密码（避免误导）。同一条命令在**没装过的机器上是安装、装过的机器上是升级**，详见下面的「升级」。
 - **非 root 也能跑**：会通过 `sudo` 提权（需要机器上有 sudo）。
 - 国内装 Docker 慢/超时：命令改成 `... | DOCKER_MIRROR=Aliyun bash`；机器走代理：命令最前面加 `https_proxy=http://IP:端口`。
 - 环境变量：`IPERF3_FLEET_DIR`（安装目录，默认 `~/iperf3-fleet`）、`IPERF3_FLEET_REPO_URL`、`IPERF3_FLEET_BRANCH`、`IPERF3_FLEET_TLS=1`（同时启用 HTTPS 网关）、`IPERF3_FLEET_VERBOSE=1`、`IPERF3_FLEET_LOG`、`NO_COLOR=1`、`DOCKER_MIRROR`、`COMPOSE_MIRROR`、`IPERF3_FLEET_TARBALL`。
@@ -89,17 +89,29 @@ docker compose --profile tls up -d
 
 ## 升级
 
-```bash
-cd ~/iperf3-fleet && git pull && docker compose --profile tls up -d --build
-```
-
-或者直接重跑一键脚本（自动 `git pull` + 重新构建，并自动保留 tls profile）：
+**重跑当初那条一键命令就行**——脚本会自己比较本地与远端：有更新就更新代码并重建镜像，没有就报告「已是最新」；数据、端口、机器接入关系全部保留，Agent 自动重连，登录密码不变。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/se-tang/iperf3-fleet/main/install.sh | bash
 ```
 
-数据、机器接入关系、端口全部保留，Agent 自动重连，登录密码不变。
+几个刻意的设计：
+
+- **不怕远端历史被重写**：内部用 `git fetch` + 强制对齐分支，而不是 `git pull --ff-only`（后者遇到 force push 会直接失败，用户就会看到「有更新但升不动」）。
+- **用新脚本继续本次部署**：走 `curl | bash` 时手里那份脚本是旧的，检测到更新后会用**更新后的** `install.sh` 重新执行一次，所以这次部署用的也是最新逻辑（只重跑一次）。
+- **本地有改动就不动它**：检测到工作区有未提交改动时**跳过**自动更新并给出提示，不会静默覆盖你的改动；想恢复官方版本：`cd ~/iperf3-fleet && git checkout -- .` 后重跑。
+
+只想检查/更新代码、先不部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/se-tang/iperf3-fleet/main/install.sh | IPERF3_FLEET_DRY_RUN=1 bash
+```
+
+也可以照旧手动来：
+
+```bash
+cd ~/iperf3-fleet && git fetch origin main && git reset --hard origin/main && docker compose --profile tls up -d --build
+```
 
 若升级时 caddy 报 `path does not exist`，说明之前的误挂载产生了同名目录，清一次即可：
 
