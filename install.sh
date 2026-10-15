@@ -626,11 +626,19 @@ rand_port() {
 }
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
 
-if [ -f "$INSTALL_DIR/.env" ]; then
+# 这里判断「是不是首次部署」，必须在 docker compose 之前定死：
+# compose 一起容器就会把 ./data 建出来，之后再看就永远是「已有数据」了
+# （曾经因此让全新部署误报「沿用已有账号」，把该显示的一次性初始密码藏了起来）。
+# 只看 auth.json：它由面板首次启动时生成，是「已经装过」的可靠标志。
+if [ -f "$INSTALL_DIR/data/auth.json" ]; then
   FRESH_INSTALL=0
-  step_done "沿用已有 .env（端口 / 绑定 / 域名不变）"
 else
   FRESH_INSTALL=1
+fi
+
+if [ -f "$INSTALL_DIR/.env" ]; then
+  step_done "沿用已有 .env（端口 / 绑定 / 域名不变）"
+else
   _p=""
   _i=0
   while [ "$_i" -lt 30 ]; do
