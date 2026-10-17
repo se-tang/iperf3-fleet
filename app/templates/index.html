@@ -407,7 +407,7 @@ kbd{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;p
           <input type="number" id="sPing" value="200" min="1" max="2000" step="1"></div>
         <label class="chk" style="margin-bottom:6px"><input type="checkbox" id="sUdp"> 📦 UDP</label>
         <div class="field" style="width:120px;margin-bottom:0"><label>UDP 带宽/流</label>
-          <input id="sUdpBw" value="100M" placeholder="100M"></div>
+          <input id="sUdpBw" value="100M" placeholder="100M" disabled></div>
       </div>
     </div>
     <div class="row" style="align-items:center">
@@ -1141,6 +1141,13 @@ function lifetimeSeconds() {
   return v * unit;
 }
 
+function syncUdpControls(checkId, bandwidthId) {
+  const on = $(checkId).checked;
+  const bandwidth = $(bandwidthId);
+  bandwidth.disabled = !on;
+  bandwidth.style.opacity = on ? '1' : '.55';
+}
+
 function syncLifetimeControls() {
   const on = $('sLifetimeEnabled').checked;
   $('sLifetimeRow').classList.toggle('is-off', !on);
@@ -1275,6 +1282,7 @@ function seedScheduleForm(s) {
   $('sPing').value = src.ping_count;
   $('sUdp').checked = !!src.udp;
   $('sUdpBw').value = src.udp_bandwidth || '100M';
+  syncUdpControls('sUdp', 'sUdpBw');
   $('sIpv6').checked = !!(s ? s.ip_version === 6 : ($('useIpv6').checked && !$('useIpv6').disabled));
   $('sWait').checked = !!(s && s.on_busy === 'wait');
   // 定时任务的默认参数直接跟随「发起测试」区域的当前设置，避免两处不一致
@@ -1731,9 +1739,7 @@ $('useIpv6').addEventListener('change', () => {
 
 $('cfgUdp').addEventListener('change', () => {
   // 只有 UDP 需要 -b（TCP 无限速）；关掉时保留填写的值，下次勾选还在
-  const on = $('cfgUdp').checked;
-  $('cfgUdpBw').disabled = !on;
-  $('cfgUdpBw').style.opacity = on ? '1' : '.55';
+  syncUdpControls('cfgUdp', 'cfgUdpBw');
 });
 
 $('cfgAdvPorts').addEventListener('change', () => {
@@ -1770,8 +1776,7 @@ $('sShowAdv').addEventListener('change', () => {
 });
 
 $('sUdp').addEventListener('change', () => {
-  $('sUdpBw').disabled = !$('sUdp').checked;
-  $('sUdpBw').style.opacity = $('sUdp').checked ? '1' : '.55';
+  syncUdpControls('sUdp', 'sUdpBw');
 });
 
 $('sLifetimeEnabled').addEventListener('change', () => {
@@ -1785,6 +1790,8 @@ $('onlyScheduled').addEventListener('change', () => loadRuns());
 async function init() {
   try {
     applyTheme(localStorage.getItem('fleet-theme') || 'light');
+    syncUdpControls('cfgUdp', 'cfgUdpBw');
+    syncUdpControls('sUdp', 'sUdpBw');
     const me = await api('/api/me');
     $('meUser').textContent = me.user ? `👤 ${me.user}` : '';
     await loadMachines();

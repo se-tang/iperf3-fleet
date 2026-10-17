@@ -1353,6 +1353,22 @@ def test_install_dirty_update():
     print(result.stdout.strip())
 
 
+def test_udp_controls_initial_state():
+    """UDP 带宽输入框必须在首次渲染和定时任务弹窗打开时就同步禁用状态。"""
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, 'app', 'templates', 'index.html'), encoding='utf-8') as f:
+        html = f.read()
+    assert 'function syncUdpControls(checkId, bandwidthId)' in html
+    assert re.search(r'id="sUdpBw"[^>]*disabled', html), '定时任务的 UDP 带宽初始应禁用'
+    init_block = html.split('async function init()', 1)[1][:800]
+    assert "syncUdpControls('cfgUdp', 'cfgUdpBw')" in init_block
+    assert "syncUdpControls('sUdp', 'sUdpBw')" in init_block
+    seed_block = html.split('function seedScheduleForm(s)', 1)[1].split('function openScheduleForm', 1)[0]
+    assert "syncUdpControls('sUdp', 'sUdpBw')" in seed_block
+    print('UDP 带宽输入框初始状态同步 OK')
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
@@ -1379,4 +1395,5 @@ if __name__ == '__main__':
     test_schedule_comparison_report()
     test_version_sync()
     test_install_dirty_update()
+    test_udp_controls_initial_state()
     print('\nALL TESTS PASSED')

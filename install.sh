@@ -31,7 +31,7 @@ umask 022
 APP_NAME="iperf3-fleet"
 # 当前版本：与 app/app.py 的 APP_VERSION 保持一致（app.py 是唯一权威）。
 # 升级时脚本会用「更新后的代码里」的版本号自我重跑，所以这里的值只对「全新安装」生效。
-APP_VERSION="0.3.3"
+APP_VERSION="0.3.4"
 REPO_URL="${IPERF3_FLEET_REPO_URL:-https://github.com/se-tang/iperf3-fleet.git}"
 BRANCH="${IPERF3_FLEET_BRANCH:-main}"
 INSTALL_DIR="${IPERF3_FLEET_DIR:-$HOME/iperf3-fleet}"
