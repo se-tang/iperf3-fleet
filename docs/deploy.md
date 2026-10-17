@@ -99,7 +99,8 @@ curl -fsSL https://raw.githubusercontent.com/se-tang/iperf3-fleet/main/install.s
 
 - **不怕远端历史被重写**：内部用 `git fetch` + 强制对齐分支，而不是 `git pull --ff-only`（后者遇到 force push 会直接失败，用户就会看到「有更新但升不动」）。
 - **用新脚本继续本次部署**：走 `curl | bash` 时手里那份脚本是旧的，检测到更新后会用**更新后的** `install.sh` 重新执行一次，所以这次部署用的也是最新逻辑（只重跑一次）。
-- **本地改动不会挡住升级**：检测到未提交改动时，先用 `git stash push --include-untracked` 自动备份，再把代码对齐到远端并继续部署；备份 ID 会显示在部署结论里。备份失败时才会停止更新，避免静默覆盖。之后可用 `git -C ~/iperf3-fleet stash list` 查看。
+- **HTTPS 不会因容器被删而丢失**：升级时除了检查已有 Caddy 容器，也会读取 `.env` 中的 `PANEL_DOMAIN` / `PANEL_COOKIE_SECURE` / `CADDY_*` 和 `Caddyfile.local`，自动补上 `--profile tls`。
+- **本地改动不会挡住升级**：检测到未提交代码时，先用 `git stash push --include-untracked` 自动备份，再把代码对齐到远端并继续部署；备份 ID 会显示在部署结论里。`.env`、`Caddyfile.local`、`certs/` 和 `data/` 属于运行时配置，升级检测会明确排除，不会进入 stash，也不会遮挡 HTTPS 配置。备份失败时才会停止更新，避免静默覆盖。
 
 只想检查/更新代码、先不部署：
 
@@ -120,6 +121,22 @@ cd ~/iperf3-fleet && git stash push -u -m "manual-upgrade-backup" \
 ```bash
 rm -rf ~/iperf3-fleet/Caddyfile.local && cp -T ~/iperf3-fleet/Caddyfile.acme ~/iperf3-fleet/Caddyfile.local && docker compose --profile tls up -d
 ```
+
+### 升级后 HTTPS 打不开（v0.3.1 及更早版本）
+
+`v0.3.1` 会把未跟踪的 `.env` 当成普通本地改动存进 stash，可能顺带移除域名与 Caddy 端口配置，导致 IP 端口仍可访问但 HTTPS 反代失效。先找回升级前的配置：
+
+```bash
+cd ~/iperf3-fleet
+git stash list
+# 找到 “iperf3-fleet auto-update backup ...” 对应的一项，下面以 stash@{0} 为例
+git ls-tree -r --name-only 'stash@{0}^3' | grep -E '^(\.env|Caddyfile\.local|certs/)'
+cp -a .env .env.before-recovery 2>/dev/null || true
+git restore --source='stash@{0}^3' -- .env Caddyfile.local certs
+docker compose --profile tls up -d --force-recreate
+```
+
+如果 `.env` 不在 `stash@{0}`，按 `git stash list` 中的其它编号替换。`v0.3.2` 起 `.env`、`certs/` 会由 `.gitignore` 和 `.git/info/exclude` 双重保护，后续升级不会再移动这些运行时文件。
 
 ## 卸载
 

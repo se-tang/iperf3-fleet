@@ -1326,6 +1326,13 @@ def test_version_sync():
         '不该再用 git pull --ff-only：远端历史被重写（force push）时会直接失败'
     assert 'stash push --include-untracked' in inst, \
         '本地有改动时应先备份到 stash，再自动更新'
+    assert 'ensure_runtime_excludes' in inst, \
+        '升级前必须把 .env / 证书 / 数据排除在本地代码改动之外'
+    for key in ('tls_config_present', 'PANEL_DOMAIN=.+', 'CADDY_HTTPS=.+'):
+        assert key in inst, f'HTTPS 自动识别缺少关键片段：{key}'
+    ignore = read('.gitignore')
+    assert '\n.env\n' in '\n' + ignore, '.env 必须被 .gitignore 忽略'
+    assert '\ncerts/\n' in '\n' + ignore, 'certs/ 必须被 .gitignore 忽略'
     print(f'版本号唯一来源 / 自动更新关键实现 OK（v{ver}）')
 
 

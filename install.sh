@@ -31,7 +31,7 @@ umask 022
 APP_NAME="iperf3-fleet"
 # 当前版本：与 app/app.py 的 APP_VERSION 保持一致（app.py 是唯一权威）。
 # 升级时脚本会用「更新后的代码里」的版本号自我重跑，所以这里的值只对「全新安装」生效。
-APP_VERSION="0.3.1"
+APP_VERSION="0.3.2"
 REPO_URL="${IPERF3_FLEET_REPO_URL:-https://github.com/se-tang/iperf3-fleet.git}"
 BRANCH="${IPERF3_FLEET_BRANCH:-main}"
 INSTALL_DIR="${IPERF3_FLEET_DIR:-$HOME/iperf3-fleet}"
@@ -266,7 +266,19 @@ fetch() { # $1=url $2=输出文件
 }
 
 # --- update helpers (kept as one block for tests/test_install_update.sh) ---
+ensure_runtime_excludes() {
+  [ -d "$INSTALL_DIR/.git" ] || return 0
+  _exclude="$INSTALL_DIR/.git/info/exclude"
+  mkdir -p "$INSTALL_DIR/.git/info" 2>/dev/null || return 0
+  for _pattern in '/.env' '/Caddyfile.local' '/certs/' '/data/' '/data-*/'; do
+    grep -qxF "$_pattern" "$_exclude" 2>/dev/null \
+      || printf '%s\n' "$_pattern" >>"$INSTALL_DIR/.git/info/exclude" 2>/dev/null || true
+  done
+}
+
 repo_has_changes() {
+  # .env / 证书 / 数据是运行时配置，不能被当成“本地代码改动”stash 走
+  ensure_runtime_excludes
   [ -n "$(git -C "$INSTALL_DIR" status --porcelain 2>/dev/null)" ]
 }
 
@@ -709,6 +721,15 @@ fi
 # ---------------------------------------------------------------------------
 TLS=0
 [ "${IPERF3_FLEET_TLS:-}" = "1" ] && TLS=1
+tls_config_present() {
+  [ -f "$INSTALL_DIR/Caddyfile.local" ] && return 0
+  [ -f "$INSTALL_DIR/.env" ] || return 1
+  grep -Eq '^[[:space:]]*(PANEL_DOMAIN=.+|PANEL_COOKIE_SECURE=1|CADDY_HTTP=.+|CADDY_HTTPS=.+)' \
+    "$INSTALL_DIR/.env"
+}
+if tls_config_present; then
+  TLS=1
+fi
 if docker_cli ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'iperf3-fleet-caddy'; then
   TLS=1
 fi

@@ -19,6 +19,11 @@ git -C "$TMP/seed" push -q -u origin main
 git clone -q "$TMP/remote.git" "$TMP/work"
 printf 'local-change\n' >>"$TMP/work/app.txt"
 printf 'untracked-change\n' >"$TMP/work/local-only.txt"
+printf 'PANEL_PORT=23456\nPANEL_DOMAIN=panel.example.com\n' >"$TMP/work/.env"
+printf 'custom-caddy-config\n' >"$TMP/work/Caddyfile.local"
+mkdir -p "$TMP/work/certs" "$TMP/work/data"
+printf 'origin-cert\n' >"$TMP/work/certs/origin.pem"
+printf 'runtime-db\n' >"$TMP/work/data/panel.db"
 
 printf 'remote-v2\n' >"$TMP/seed/app.txt"
 git -C "$TMP/seed" add app.txt
@@ -44,9 +49,16 @@ test "$(git -C "$INSTALL_DIR" rev-parse HEAD)" = \
      "$(git -C "$INSTALL_DIR" rev-parse "origin/$BRANCH")"
 test "$(cat "$INSTALL_DIR/app.txt")" = "remote-v2"
 test -z "$(git -C "$INSTALL_DIR" status --porcelain)"
+test "$(cat "$INSTALL_DIR/.env")" = "PANEL_PORT=23456
+PANEL_DOMAIN=panel.example.com"
+test "$(cat "$INSTALL_DIR/Caddyfile.local")" = "custom-caddy-config"
+test "$(cat "$INSTALL_DIR/certs/origin.pem")" = "origin-cert"
+test "$(cat "$INSTALL_DIR/data/panel.db")" = "runtime-db"
 test -n "$LOCAL_BACKUP"
 test "$(git -C "$INSTALL_DIR" stash list | wc -l)" -eq 1
 git -C "$INSTALL_DIR" show "$LOCAL_BACKUP:app.txt" | grep -q 'local-change'
 git -C "$INSTALL_DIR" show "$LOCAL_BACKUP^3:local-only.txt" | grep -q 'untracked-change'
+! git -C "$INSTALL_DIR" cat-file -e "$LOCAL_BACKUP^3:.env" 2>/dev/null
+! git -C "$INSTALL_DIR" cat-file -e "$LOCAL_BACKUP^3:certs/origin.pem" 2>/dev/null
 
 printf 'install.sh dirty-worktree update OK\n'
