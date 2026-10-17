@@ -100,7 +100,7 @@ curl -fsSL https://raw.githubusercontent.com/se-tang/iperf3-fleet/main/install.s
 - **不怕远端历史被重写**：内部用 `git fetch` + 强制对齐分支，而不是 `git pull --ff-only`（后者遇到 force push 会直接失败，用户就会看到「有更新但升不动」）。
 - **用新脚本继续本次部署**：走 `curl | bash` 时手里那份脚本是旧的，检测到更新后会用**更新后的** `install.sh` 重新执行一次，所以这次部署用的也是最新逻辑（只重跑一次）。
 - **HTTPS 不会因容器被删而丢失**：升级时除了检查已有 Caddy 容器，也会读取 `.env` 中的 `PANEL_DOMAIN` / `PANEL_COOKIE_SECURE` / `CADDY_*` 和 `Caddyfile.local`，自动补上 `--profile tls`。
-- **本地改动不会挡住升级**：检测到未提交代码时，先用 `git stash push --include-untracked` 自动备份，再把代码对齐到远端并继续部署；备份 ID 会显示在部署结论里。`.env`、`Caddyfile.local`、`certs/` 和 `data/` 属于运行时配置，升级检测会明确排除，不会进入 stash，也不会遮挡 HTTPS 配置。备份失败时才会停止更新，避免静默覆盖。
+- **本地改动不会挡住升级**：检测到未提交代码时，先用 `git stash push --include-untracked` 自动备份，再把代码对齐到远端并继续部署；备份 ID 会显示在部署结论里。`.env`、`Caddyfile.local`、`certs/` 和 `data/` 属于运行时配置，升级检测会明确排除，不会进入 stash，也不会遮挡 HTTPS 配置。若入口是旧版脚本、配置已经被 stash，`v0.3.3` 会在生成新配置前自动找回这些运行时文件。备份失败时才会停止更新，避免静默覆盖。
 
 只想检查/更新代码、先不部署：
 
@@ -136,7 +136,7 @@ git restore --source='stash@{0}^3' -- .env Caddyfile.local certs
 docker compose --profile tls up -d --force-recreate
 ```
 
-如果 `.env` 不在 `stash@{0}`，按 `git stash list` 中的其它编号替换。`v0.3.2` 起 `.env`、`certs/` 会由 `.gitignore` 和 `.git/info/exclude` 双重保护，后续升级不会再移动这些运行时文件。
+如果 `.env` 不在 `stash@{0}`，按 `git stash list` 中的其它编号替换。`v0.3.2` 起 `.env`、`certs/` 会由 `.gitignore` 和 `.git/info/exclude` 双重保护；`v0.3.3` 还会在旧版脚本已经 stash 的情况下自动从升级备份恢复，因此后续正常升级**不需要**再手工修改 `PANEL_PORT` 或补回 `PANEL_BIND`。
 
 ## 卸载
 

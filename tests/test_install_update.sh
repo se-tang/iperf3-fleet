@@ -61,4 +61,23 @@ git -C "$INSTALL_DIR" show "$LOCAL_BACKUP^3:local-only.txt" | grep -q 'untracked
 ! git -C "$INSTALL_DIR" cat-file -e "$LOCAL_BACKUP^3:.env" 2>/dev/null
 ! git -C "$INSTALL_DIR" cat-file -e "$LOCAL_BACKUP^3:certs/origin.pem" 2>/dev/null
 
+# 模拟旧版脚本已经把运行时文件 stash 走：新版启动时必须自动找回。
+git clone -q "$TMP/remote.git" "$TMP/legacy"
+printf 'PANEL_PORT=11192\nPANEL_BIND=127.0.0.1\nPANEL_DOMAIN=panel.example.com\n' \
+  >"$TMP/legacy/.env"
+printf 'legacy-caddy\n' >"$TMP/legacy/Caddyfile.local"
+mkdir -p "$TMP/legacy/certs"
+printf 'legacy-cert\n' >"$TMP/legacy/certs/origin.pem"
+git -C "$TMP/legacy" -c user.name=test -c user.email=test@example.com \
+  -c commit.gpgsign=false stash push -u -q -m "iperf3-fleet auto-update backup legacy"
+LOCAL_BACKUP="$(git -C "$TMP/legacy" rev-parse refs/stash)"
+rm -f "$TMP/legacy/.env" "$TMP/legacy/Caddyfile.local"
+rm -rf "$TMP/legacy/certs"
+INSTALL_DIR="$TMP/legacy"
+restore_runtime_from_backup
+grep -qx 'PANEL_PORT=11192' "$INSTALL_DIR/.env"
+grep -qx 'PANEL_BIND=127.0.0.1' "$INSTALL_DIR/.env"
+test "$(cat "$INSTALL_DIR/Caddyfile.local")" = "legacy-caddy"
+test "$(cat "$INSTALL_DIR/certs/origin.pem")" = "legacy-cert"
+
 printf 'install.sh dirty-worktree update OK\n'

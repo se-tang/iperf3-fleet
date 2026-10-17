@@ -31,7 +31,7 @@ umask 022
 APP_NAME="iperf3-fleet"
 # 当前版本：与 app/app.py 的 APP_VERSION 保持一致（app.py 是唯一权威）。
 # 升级时脚本会用「更新后的代码里」的版本号自我重跑，所以这里的值只对「全新安装」生效。
-APP_VERSION="0.3.2"
+APP_VERSION="0.3.3"
 REPO_URL="${IPERF3_FLEET_REPO_URL:-https://github.com/se-tang/iperf3-fleet.git}"
 BRANCH="${IPERF3_FLEET_BRANCH:-main}"
 INSTALL_DIR="${IPERF3_FLEET_DIR:-$HOME/iperf3-fleet}"
@@ -305,6 +305,18 @@ align_repo_to_remote() {
   fi
   git -C "$INSTALL_DIR" checkout -q -B "$BRANCH" "origin/$BRANCH" >>"$LOG_FILE" 2>&1 \
     || git -C "$INSTALL_DIR" reset --hard -q "origin/$BRANCH" >>"$LOG_FILE" 2>&1
+}
+
+restore_runtime_from_backup() {
+  [ -n "$LOCAL_BACKUP" ] || return 0
+  git -C "$INSTALL_DIR" rev-parse --verify "$LOCAL_BACKUP^3" >/dev/null 2>&1 || return 0
+  for _path in .env Caddyfile.local certs; do
+    [ -e "$INSTALL_DIR/$_path" ] && continue
+    git -C "$INSTALL_DIR" cat-file -e "$LOCAL_BACKUP^3:$_path" 2>/dev/null || continue
+    git -C "$INSTALL_DIR" restore --source="$LOCAL_BACKUP^3" -- "$_path" \
+      >>"$LOG_FILE" 2>&1 || continue
+    log_file "已从升级备份恢复运行时配置：$_path"
+  done
 }
 # --- end update helpers ---
 
@@ -658,6 +670,7 @@ fi
 # ---------------------------------------------------------------------------
 # 自检 5/5：生成/读取 .env（端口随机生成后固定不变，升级保持不变）
 # ---------------------------------------------------------------------------
+restore_runtime_from_backup
 step "运行配置"
 rand_port() {
   if have shuf; then shuf -i 10000-30000 -n 1; return; fi
