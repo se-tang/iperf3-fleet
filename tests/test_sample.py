@@ -1379,7 +1379,7 @@ def test_brand_logo():
         assert 'logo.svg' in page and '📡' not in page, name
     with open(os.path.join(root, 'app', 'static', 'logo.svg'), encoding='utf-8') as f:
         logo = f.read()
-    assert '<svg' in logo and '#38bdf8' in logo and '#4ade80' in logo
+    assert '<svg' in logo and '#f97316' in logo and '#0d9488' in logo
     resp = flask_app.test_client().get('/static/logo.svg')
     assert resp.status_code == 200
     assert resp.mimetype in ('image/svg+xml', 'image/svg+xml;charset=utf-8'), resp.mimetype

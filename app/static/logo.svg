@@ -1,14 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
   <title id="title">iperf3-fleet logo</title>
-  <desc id="desc">A central target node connected to three fleet nodes</desc>
-  <rect x="2" y="2" width="60" height="60" rx="14" fill="#0b1526" stroke="#1e3a5f" stroke-width="2"/>
-  <path d="M32 32 17 17M32 32 49 17M32 32 32 50" fill="none" stroke="#8fa3b8"
-        stroke-width="2.6" stroke-linecap="round"/>
-  <circle cx="17" cy="17" r="4" fill="#4ade80" stroke="#0b1526" stroke-width="2"/>
-  <circle cx="49" cy="17" r="4" fill="#4ade80" stroke="#0b1526" stroke-width="2"/>
-  <circle cx="32" cy="50" r="4" fill="#4ade80" stroke="#0b1526" stroke-width="2"/>
-  <path d="M40.5 24.5a12.5 12.5 0 0 1 0 15" fill="none" stroke="#38bdf8"
-        stroke-width="2.2" stroke-linecap="round" opacity=".72"/>
-  <circle cx="32" cy="32" r="9" fill="#0b1526" stroke="#38bdf8" stroke-width="3"/>
-  <circle cx="32" cy="32" r="2.8" fill="#e0f2fe"/>
+  <desc id="desc">Orange uplink and green downlink arrows for bidirectional network throughput testing</desc>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#fff8e9" stroke="#e6d8bd" stroke-width="2"/>
+  <path d="M23 48V20M15 28l8-9 8 9" fill="none" stroke="#f97316"
+        stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M41 16v28M33 36l8 9 8-9" fill="none" stroke="#0d9488"
+        stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="32" cy="32" r="4" fill="#eab308" stroke="#fff8e9" stroke-width="2"/>
 </svg>
