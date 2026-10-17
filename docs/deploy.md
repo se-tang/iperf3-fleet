@@ -99,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/se-tang/iperf3-fleet/main/install.s
 
 - **不怕远端历史被重写**：内部用 `git fetch` + 强制对齐分支，而不是 `git pull --ff-only`（后者遇到 force push 会直接失败，用户就会看到「有更新但升不动」）。
 - **用新脚本继续本次部署**：走 `curl | bash` 时手里那份脚本是旧的，检测到更新后会用**更新后的** `install.sh` 重新执行一次，所以这次部署用的也是最新逻辑（只重跑一次）。
-- **本地有改动就不动它**：检测到工作区有未提交改动时**跳过**自动更新并给出提示，不会静默覆盖你的改动；想恢复官方版本：`cd ~/iperf3-fleet && git checkout -- .` 后重跑。
+- **本地改动不会挡住升级**：检测到未提交改动时，先用 `git stash push --include-untracked` 自动备份，再把代码对齐到远端并继续部署；备份 ID 会显示在部署结论里。备份失败时才会停止更新，避免静默覆盖。之后可用 `git -C ~/iperf3-fleet stash list` 查看。
 
 只想检查/更新代码、先不部署：
 
@@ -110,7 +110,9 @@ curl -fsSL https://raw.githubusercontent.com/se-tang/iperf3-fleet/main/install.s
 也可以照旧手动来：
 
 ```bash
-cd ~/iperf3-fleet && git fetch origin main && git reset --hard origin/main && docker compose --profile tls up -d --build
+cd ~/iperf3-fleet && git stash push -u -m "manual-upgrade-backup" \
+  && git fetch origin main && git reset --hard origin/main \
+  && docker compose --profile tls up -d --build
 ```
 
 若升级时 caddy 报 `path does not exist`，说明之前的误挂载产生了同名目录，清一次即可：

@@ -31,12 +31,13 @@ umask 022
 APP_NAME="iperf3-fleet"
 # 当前版本：与 app/app.py 的 APP_VERSION 保持一致（app.py 是唯一权威）。
 # 升级时脚本会用「更新后的代码里」的版本号自我重跑，所以这里的值只对「全新安装」生效。
-APP_VERSION="0.3.0"
+APP_VERSION="0.3.1"
 REPO_URL="${IPERF3_FLEET_REPO_URL:-https://github.com/se-tang/iperf3-fleet.git}"
 BRANCH="${IPERF3_FLEET_BRANCH:-main}"
 INSTALL_DIR="${IPERF3_FLEET_DIR:-$HOME/iperf3-fleet}"
 LOG_FILE="${IPERF3_FLEET_LOG:-/tmp/iperf3-fleet-install.log}"
 VERBOSE="${IPERF3_FLEET_VERBOSE:-0}"
+LOCAL_BACKUP="${IPERF3_FLEET_LOCAL_BACKUP:-}"
 
 # ---------------------------------------------------------------------------
 # 输出与通用工具
@@ -264,6 +265,37 @@ fetch() { # $1=url $2=输出文件
   fi
 }
 
+# --- update helpers (kept as one block for tests/test_install_update.sh) ---
+repo_has_changes() {
+  [ -n "$(git -C "$INSTALL_DIR" status --porcelain 2>/dev/null)" ]
+}
+
+backup_repo_changes() {
+  repo_has_changes || return 0
+  _stash_msg="iperf3-fleet auto-update backup $(date +%Y%m%d-%H%M%S)"
+  log_file "备份本地改动：git -C $INSTALL_DIR stash push --include-untracked -m $_stash_msg"
+  if ! git -C "$INSTALL_DIR" -c user.name=iperf3-fleet-updater \
+      -c user.email=iperf3-fleet-updater@localhost \
+      stash push --include-untracked -m "$_stash_msg" >>"$LOG_FILE" 2>&1; then
+    return 1
+  fi
+  LOCAL_BACKUP="$(git -C "$INSTALL_DIR" rev-parse --verify refs/stash 2>/dev/null || true)"
+  [ -n "$LOCAL_BACKUP" ] || return 1
+  export IPERF3_FLEET_LOCAL_BACKUP="$LOCAL_BACKUP"
+  log_file "本地改动已备份到 stash $LOCAL_BACKUP"
+  return 0
+}
+
+align_repo_to_remote() {
+  if ! backup_repo_changes; then
+    warn "本地改动备份失败，已停止更新以保护现有代码"
+    return 1
+  fi
+  git -C "$INSTALL_DIR" checkout -q -B "$BRANCH" "origin/$BRANCH" >>"$LOG_FILE" 2>&1 \
+    || git -C "$INSTALL_DIR" reset --hard -q "origin/$BRANCH" >>"$LOG_FILE" 2>&1
+}
+# --- end update helpers ---
+
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # 开场：一眼看清「这是什么 / 在哪台机器上做什么」
@@ -288,10 +320,7 @@ if [ "${IPERF3_FLEET_REEXEC:-0}" != "1" ] && [ -d "$INSTALL_DIR/.git" ] && have 
   if git -C "$INSTALL_DIR" fetch --prune origin "$BRANCH" >>"$LOG_FILE" 2>&1; then
     _l="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || echo '')"
     _r="$(git -C "$INSTALL_DIR" rev-parse "origin/$BRANCH" 2>/dev/null || echo '')"
-    if [ -n "$_r" ] && [ "$_l" != "$_r" ] \
-       && [ -z "$(git -C "$INSTALL_DIR" status --porcelain 2>/dev/null)" ]; then
-      git -C "$INSTALL_DIR" checkout -q -B "$BRANCH" "origin/$BRANCH" >>"$LOG_FILE" 2>&1 \
-        || git -C "$INSTALL_DIR" reset --hard -q "origin/$BRANCH" >>"$LOG_FILE" 2>&1 || true
+    if [ -n "$_r" ] && [ "$_l" != "$_r" ] && align_repo_to_remote; then
       if [ -f "$INSTALL_DIR/install.sh" ]; then
         # 通知重跑后的脚本「本轮是刚更新上来的」，这样它的那行结论会说
         # 「发现新版本 → 已自动更新」，而不是「已是最新」（否则用户以为没生效）
@@ -530,18 +559,17 @@ fetch_repo() {
       fi
       return 0
     fi
-    if repo_dirty; then
-      # 本地有改动绝不 reset（会静默丢东西）：提示清楚，按现状部署
-      CODE_STATE=dirty
-      return 0
-    fi
     log_file "更新到 origin/$BRANCH（本地 $_local → $_remote）"
-    if git -C "$INSTALL_DIR" checkout -q -B "$BRANCH" "origin/$BRANCH" >>"$LOG_FILE" 2>&1 \
-       || git -C "$INSTALL_DIR" reset --hard -q "origin/$BRANCH" >>"$LOG_FILE" 2>&1; then
+    if align_repo_to_remote; then
       # 用 fetch + 强制对齐，而不是 git pull：远端历史被重写过（force push）时
       # pull --ff-only 会直接失败，用户就看到「有更新但升不动」
       CODE_STATE=updated
       UPDATED=1
+      return 0
+    fi
+    if repo_dirty; then
+      # 不能安全备份时绝不 reset，避免静默覆盖用户改动
+      CODE_STATE=dirty
       return 0
     fi
     warn "代码更新失败，继续用当前代码部署"
@@ -596,9 +624,12 @@ case "$CODE_STATE" in
   fresh)   step_done "已克隆仓库${CODE_VER:+（v$CODE_VER）} → $INSTALL_DIR" ;;
   tarball) step_done "已下载源码包${CODE_VER:+（v$CODE_VER）} → $INSTALL_DIR" ;;
   current) step_done "已是最新${CODE_VER:+（v$CODE_VER）}（远端无新提交）" ;;
-  updated) step_done "发现新版本 → 已自动更新${CODE_VER:+（v$CODE_VER）}" ;;
-  dirty)   step_done "有本地改动，跳过自动更新${CODE_VER:+（按当前代码 v$CODE_VER 部署）}"
-           step_note "想恢复官方版本：cd $INSTALL_DIR && git checkout -- . && 重跑本脚本" ;;
+  updated) step_done "发现新版本 → 已自动更新${CODE_VER:+（v$CODE_VER）}"
+           if [ -n "$LOCAL_BACKUP" ]; then
+             step_note "本地改动已备份到 stash ${LOCAL_BACKUP:0:12}"
+           fi ;;
+  dirty)   step_done "本地改动备份失败，未自动更新${CODE_VER:+（按当前代码 v$CODE_VER 部署）}"
+           step_note "请先执行 git -C $INSTALL_DIR stash push -u，再重跑本脚本" ;;
   plain)   step_done "使用现有目录${CODE_VER:+（v$CODE_VER）}（非 git 仓库，不支持自动更新）" ;;
   *)       step_done "就绪${CODE_VER:+（v$CODE_VER）} → $INSTALL_DIR" ;;
 esac
@@ -803,6 +834,10 @@ printf '    %s日志%s  cd %s && docker compose %slogs -f --tail 100 iperf3-flee
 printf '    %s卸载%s  cd %s && docker compose %sdown && rm -rf data .env\n' \
   "$C_DIM" "$C_RESET" "$INSTALL_DIR" "$COMPOSE_ARGS"
 printf '    %s安装日志%s  %s\n' "$C_DIM" "$C_RESET" "$LOG_FILE"
+if [ -n "$LOCAL_BACKUP" ]; then
+  printf '    %s本地备份%s  %s（查看：git -C %s stash list；恢复：git -C %s stash show -p %s）\n' \
+    "$C_DIM" "$C_RESET" "${LOCAL_BACKUP:0:12}" "$INSTALL_DIR" "$INSTALL_DIR" "${LOCAL_BACKUP:0:12}"
+fi
 printf '\n'
 _rule '─'
 printf '\n'

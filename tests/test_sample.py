@@ -1324,7 +1324,24 @@ def test_version_sync():
         assert key in inst, f'install.sh 缺少自动更新关键片段：{key}'
     assert 'git pull --ff-only' not in inst, \
         '不该再用 git pull --ff-only：远端历史被重写（force push）时会直接失败'
+    assert 'stash push --include-untracked' in inst, \
+        '本地有改动时应先备份到 stash，再自动更新'
     print(f'版本号唯一来源 / 自动更新关键实现 OK（v{ver}）')
+
+
+def test_install_dirty_update():
+    """模拟远端有新版本 + 本地有未提交/未跟踪文件，确认自动更新且改动可找回。"""
+    import shutil
+    import subprocess
+
+    if os.name != 'posix' or not shutil.which('bash') or not shutil.which('git'):
+        print('跳过 install.sh 升级集成测试（需要 POSIX bash + git）')
+        return
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = os.path.join(root, 'tests', 'test_install_update.sh')
+    result = subprocess.run(['bash', script], capture_output=True, text=True)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    print(result.stdout.strip())
 
 
 if __name__ == '__main__':
@@ -1352,4 +1369,5 @@ if __name__ == '__main__':
     test_schedule_restart_recovery()
     test_schedule_comparison_report()
     test_version_sync()
+    test_install_dirty_update()
     print('\nALL TESTS PASSED')
