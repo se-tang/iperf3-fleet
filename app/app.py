@@ -19,7 +19,7 @@ from . import db, quality, runner, scheduler
 
 # 版本号：这是唯一权威（面板页面、部署横幅、install.sh 都从/沿用它取）。
 # 还在测试阶段，因此用 0.x 版本号。
-APP_VERSION = '0.2.9'
+APP_VERSION = '0.3.0'
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
@@ -474,10 +474,10 @@ def api_schedules():
     return jsonify([scheduler.schedule_summary(s) for s in db.get_schedules()])
 
 
-def _schedule_payload(data):
+def _schedule_payload(data, base=None):
     """先做参数校验（和手动测试同一套），再收敛定时任务自身的字段。"""
     params = runner.normalize_params(data)
-    fields = scheduler.normalize_schedule(data)
+    fields = scheduler.normalize_schedule(data, base=base)
     fields.update({k: params[k] for k in ('streams', 'duration', 'port', 'ping_count',
                                           'udp_bandwidth', 'ports')})
     fields['udp'] = 1 if params['udp'] else 0
@@ -488,6 +488,7 @@ def _schedule_payload(data):
 def api_schedule_create():
     data = request.get_json(force=True, silent=True) or {}
     fields = _schedule_payload(data)
+    fields['ends_at'] = scheduler.compute_end(fields['lifetime_seconds'])
     fields['next_run_at'] = scheduler.compute_next(fields['interval_seconds'])
     s = db.create_schedule(fields)
     return jsonify(scheduler.schedule_summary(s))
@@ -513,12 +514,20 @@ def api_schedule_get(sid):
 
 @app.put('/api/schedules/<int:sid>')
 def api_schedule_update(sid):
-    if not db.get_schedule(sid):
+    old = db.get_schedule(sid)
+    if not old:
         return jsonify({'error': '定时任务不存在'}), 404
     data = request.get_json(force=True, silent=True) or {}
-    fields = _schedule_payload(data)
+    fields = _schedule_payload(data, base=old)
+    # 只改名字/参数时保留原结束时间；改动运行时长才从当前时刻重新计时
+    if int(fields['lifetime_seconds']) != int(old.get('lifetime_seconds') or 0):
+        new_end = scheduler.compute_end(fields['lifetime_seconds'])
+        fields['ends_at'] = new_end
+        # 页面上的「延长时间」即恢复已到期任务；普通停用任务保持停用
+        if scheduler.is_expired(old) and (not new_end or not scheduler.is_expired({'ends_at': new_end})):
+            fields['enabled'] = 1
+            fields['next_run_at'] = scheduler.compute_next(fields['interval_seconds'])
     # 间隔变了就按新间隔重排下一次；否则保留原有排队时间（避免改个名字就重置周期）
-    old = db.get_schedule(sid)
     if int(fields['interval_seconds']) != int(old.get('interval_seconds') or 0):
         fields['next_run_at'] = scheduler.compute_next(fields['interval_seconds'])
     elif not old.get('next_run_at'):
@@ -541,6 +550,8 @@ def api_schedule_toggle(sid):
     if not s:
         return jsonify({'error': '定时任务不存在'}), 404
     want = not s['enabled']
+    if want and scheduler.is_expired(s):
+        return jsonify({'error': '任务已到期，请先编辑并延长运行时长'}), 400
     fields = {'enabled': 1 if want else 0}
     # 重新启用时从「现在」开始计时，避免停用很久后立刻触发一串积压的轮次
     if want:
@@ -563,7 +574,9 @@ def api_schedule_run_now(sid):
 def api_schedule_comparison(sid):
     if not db.get_schedule(sid):
         return jsonify({'error': '定时任务不存在'}), 404
-    return jsonify(scheduler.comparison_data(sid))
+    limit = request.args.get('limit', scheduler.ROUND_LIMIT, type=int) or scheduler.ROUND_LIMIT
+    limit = max(1, min(limit, scheduler.ROUND_LIMIT))
+    return jsonify(scheduler.comparison_data(sid, limit=limit))
 
 
 @app.get('/api/schedules/<int:sid>/report')

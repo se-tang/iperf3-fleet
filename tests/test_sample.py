@@ -310,6 +310,13 @@ def test_probe_script():
                         '  *"addr show"*) cat "$d/ip6.txt" ;;\n'
                         'esac\n')
             os.chmod(p, 0o755)
+        else:
+            # 显式放一个失败的 ip 占位：宿主若装了 iproute2，PATH 末尾仍能找到
+            # 真命令，测试就会误走「有 ip」分支，无法覆盖 hostname -I 回退。
+            p = os.path.join(d, 'ip')
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write('#!/bin/sh\nexit 1\n')
+            os.chmod(p, 0o755)
         bins[name] = d
 
     V4 = '1.1.1.1 via 10.0.0.1 dev eth0 src 93.184.216.34 uid 0\n'
@@ -937,12 +944,16 @@ def test_schedule_params():
     s = scheduler.normalize_schedule({'target_id': 7, 'backend_ids': [1, 2, 2]})
     assert s['target_id'] == 7 and s['backend_ids'] == [1, 2], s     # 去重
     assert s['interval_seconds'] == 3600 and s['on_busy'] == 'skip', s
+    assert s['lifetime_seconds'] == 0, s                             # 旧语义：默认不限时
     assert s['name'] == '定时任务' and s['enabled'] == 1, s
     s = scheduler.normalize_schedule({'target_id': 7, 'backend_ids': ['1'], 'name': '  长期对比  ',
                                       'interval_seconds': '900', 'on_busy': 'wait', 'udp': True,
                                       'udp_bandwidth': '50m', 'ports': {'1': 6001, '2': 'x'}})
     assert s['name'] == '长期对比' and s['interval_seconds'] == 900 and s['on_busy'] == 'wait', s
     assert s['udp_bandwidth'] == '50M' and s['ports'] == {1: 6001}, s
+    s = scheduler.normalize_schedule({'target_id': 7, 'backend_ids': [1],
+                                      'lifetime_seconds': 7 * 86400})
+    assert s['lifetime_seconds'] == 7 * 86400, s
 
     # 2) 非法值一律拒绝，不能悄悄换成别的参数
     for bad in ({'target_id': 0, 'backend_ids': [1]},
@@ -950,6 +961,8 @@ def test_schedule_params():
                 {'target_id': 7, 'backend_ids': []},
                 {'target_id': 7, 'backend_ids': [1], 'interval_seconds': 10},        # 最短 5 分钟
                 {'target_id': 7, 'backend_ids': [1], 'interval_seconds': 10 ** 9},   # 最长 30 天
+                {'target_id': 7, 'backend_ids': [1], 'lifetime_seconds': -1},
+                {'target_id': 7, 'backend_ids': [1], 'lifetime_seconds': 366 * 86400},
                 {'target_id': 7, 'backend_ids': [1], 'streams': 0},
                 {'target_id': 7, 'backend_ids': [1], 'duration': 9999}):
         try:
@@ -973,6 +986,8 @@ def test_schedule_params():
     now = 1_700_000_000.0
     assert scheduler.compute_next(600, now) == scheduler.now_str(now + 600)
     assert scheduler.compute_next(1, now) == scheduler.now_str(now + scheduler.MIN_INTERVAL)
+    assert scheduler.compute_end(0, now) is None
+    assert scheduler.compute_end(7 * 86400, now) == scheduler.now_str(now + 7 * 86400)
     assert scheduler.parse_time('2026-01-02 03:04:05') is not None
     assert scheduler.parse_time('') is None and scheduler.parse_time('乱码') is None
 
@@ -991,6 +1006,7 @@ def test_schedule_params():
     assert r.status_code == 400 and '时长' in r.get_json()['error'], r.get_json()
     r = c.post('/api/schedules', json={'target_id': t['id'], 'backend_ids': [b['id']],
                                        'name': '长期对比', 'interval_seconds': 600,
+                                       'lifetime_seconds': 7 * 86400,
                                        'streams': 2, 'duration': 5, 'ping_count': 20,
                                        'udp': True, 'udp_bandwidth': '50M'})
     assert r.status_code == 200, r.get_json()
@@ -998,6 +1014,7 @@ def test_schedule_params():
     assert got['interval_text'] == '10\u00a0分钟' and got['backend_count'] == 1, got
     assert got['target_name'] == 'sch-t' and got['backend_names'] == ['sch-b'], got
     assert got['udp'] == 1 and got['streams'] == 2 and got['ping_count'] == 20, got
+    assert got['lifetime_text'] == '7\u00a0天' and got['ends_at'], got
     assert got['next_run_in'], got                       # 菜单上要显示「X 分钟后执行」
     sid = got['id']
     lst = c.get('/api/schedules').get_json()
@@ -1011,6 +1028,7 @@ def test_schedule_params():
         'udp': True, 'udp_bandwidth': '50M'})
     assert r.status_code == 200, r.get_json()
     assert db.get_schedule(sid)['next_run_at'] == before, '同名同间隔的编辑不该重置周期'
+    assert db.get_schedule(sid)['lifetime_seconds'] == 7 * 86400
     r = c.put(f'/api/schedules/{sid}', json={
         'target_id': t['id'], 'backend_ids': [b['id']], 'name': '长期对比-改名',
         'interval_seconds': 1800, 'streams': 2, 'duration': 5, 'ping_count': 20})
@@ -1028,6 +1046,38 @@ def test_schedule_params():
     assert c.delete(f'/api/schedules/{sid}').status_code == 200
     assert c.get(f'/api/schedules/{sid}').status_code == 404
     print('定时任务字段校验 / API / 周期重排 OK')
+
+
+def test_schedule_lifetime_expiry():
+    """达到运行时长后自动停止；延长时长后可以恢复，不丢历史。"""
+    from app import db, scheduler
+    db.init_db()
+    t = db.create_machine({'name': 'life-t', 'role': 'target', 'region': '', 'bandwidth': ''})
+    b = db.create_machine({'name': 'life-b', 'role': 'backend', 'region': '', 'bandwidth': ''})
+    fields = scheduler.normalize_schedule({
+        'target_id': t['id'], 'backend_ids': [b['id']], 'name': '到期用例',
+        'interval_seconds': 600, 'lifetime_seconds': 3600,
+    })
+    fields['ends_at'] = '2000-01-01 00:00:00'
+    fields['next_run_at'] = '2000-01-01 00:00:00'
+    sch = db.create_schedule(fields)
+
+    assert sch['id'] in db.expire_schedules()
+    got = db.get_schedule(sch['id'])
+    assert got['enabled'] is False and got['last_status'] == 'expired', got
+    assert got['next_run_at'] is None and '运行时长' in got['last_error'], got
+    assert all(x['id'] != sch['id'] for x in db.due_schedules('2099-01-01 00:00:00'))
+    ok, note = scheduler.trigger(sch['id'], manual=True)
+    assert not ok and '运行时长' in note, note
+
+    # 延长后 ends_at 在未来，仍需要用户启用；启用后重新排期
+    db.update_schedule(sch['id'], {'ends_at': scheduler.compute_end(3600)})
+    db.update_schedule(sch['id'], {'enabled': 1,
+                                   'next_run_at': scheduler.compute_next(600)})
+    got = db.get_schedule(sch['id'])
+    assert got['enabled'] is True and not scheduler.is_expired(got), got
+    db.delete_schedule(sch['id'])
+    print('定时任务运行时长 / 到期自动停止 / 恢复 OK')
 
 
 def test_schedule_trigger_flow():
@@ -1224,6 +1274,8 @@ def test_schedule_comparison_report():
     assert '93.184.*.*' in rep and '216.34' not in rep, rep         # 报告脱敏
     assert '每 10\u00a0分钟' in rep, rep
     assert '已完成轮次' in rep and '成功 6' in rep, rep
+    assert '**运行时长**：不限' in rep, rep
+    assert scheduler.ROUND_LIMIT >= 10000, scheduler.ROUND_LIMIT
 
     # 空数据不能炸
     empty = db.create_schedule(dict(
@@ -1295,6 +1347,7 @@ if __name__ == '__main__':
     test_job_cleanup_paths()
     test_orphan_server_reclaim()
     test_schedule_params()
+    test_schedule_lifetime_expiry()
     test_schedule_trigger_flow()
     test_schedule_restart_recovery()
     test_schedule_comparison_report()

@@ -22,6 +22,8 @@ from . import db, quality, runner
 TICK_SECONDS = 5
 MIN_INTERVAL = 300          # 5 分钟
 MAX_INTERVAL = 30 * 24 * 3600   # 30 天
+MAX_LIFETIME = 365 * 24 * 3600  # 单次长期任务最长运行一年
+ROUND_LIMIT = 10000          # 5 分钟间隔跑 30 天约 8640 轮，默认保留完整历史
 _ON_BUSY = ('skip', 'wait')
 
 _started = False
@@ -89,6 +91,8 @@ def normalize_schedule(data, base=None):
     ip_version = 6 if str(pick('ip_version', 4)).strip() == '6' else 4
     interval = num('interval_seconds', MIN_INTERVAL, MAX_INTERVAL, '间隔时间（秒）',
                    base.get('interval_seconds') or 3600)
+    lifetime = num('lifetime_seconds', 0, MAX_LIFETIME, '任务运行时长（秒）',
+                   base.get('lifetime_seconds') or 0)
     on_busy = str(pick('on_busy', 'skip') or 'skip').strip()
     if on_busy not in _ON_BUSY:
         on_busy = 'skip'
@@ -119,6 +123,7 @@ def normalize_schedule(data, base=None):
         'udp_bandwidth': str(pick('udp_bandwidth', '100M') or '100M').strip().upper(),
         'ports': ports,
         'interval_seconds': interval,
+        'lifetime_seconds': lifetime,
         'on_busy': on_busy,
     }
 
@@ -144,13 +149,19 @@ def _validate_refs(s):
 def schedule_summary(s):
     """面板列表用：定时任务 + 人类可读的下次时间与参数摘要。"""
     out = dict(s)
+    expired = is_expired(s)
+    out['expired'] = expired
     nxt = s.get('next_run_at')
     out['next_run_in'] = ''
     ts = parse_time(nxt)
-    if s.get('enabled') and ts:
+    if s.get('enabled') and not expired and ts:
         delta = int(ts - time.time())
         out['next_run_in'] = _human_delta(delta)
     out['interval_text'] = _human_duration(int(s.get('interval_seconds') or 0))
+    lifetime = int(s.get('lifetime_seconds') or 0)
+    out['lifetime_text'] = _human_duration(lifetime) if lifetime else '不限'
+    end_ts = parse_time(s.get('ends_at'))
+    out['end_in'] = _human_delta(int(end_ts - time.time())) if end_ts and not expired else ''
     out['backend_count'] = len(s.get('backend_ids') or [])
     tgt = db.get_machine(s['target_id'])
     out['target_name'] = (tgt or {}).get('name') or '（已删除）'
@@ -197,6 +208,20 @@ def compute_next(interval_seconds, frm=None):
     return now_str(frm + max(MIN_INTERVAL, int(interval_seconds or MIN_INTERVAL)))
 
 
+def compute_end(lifetime_seconds, frm=None):
+    """运行时长从保存设置时起算；0 表示不限。"""
+    lifetime = int(lifetime_seconds or 0)
+    if lifetime <= 0:
+        return None
+    frm = frm if frm is not None else time.time()
+    return now_str(frm + lifetime)
+
+
+def is_expired(s, at=None):
+    end = parse_time((s or {}).get('ends_at'))
+    return bool(end and end <= (at if at is not None else time.time()))
+
+
 def next_run_from(interval_seconds, frm=None):
     """由于「本轮被跳过 / 冲突」而重新排队时，给一个更短的复查间隔。"""
     frm = frm if frm is not None else time.time()
@@ -208,6 +233,8 @@ def trigger(sid, planned_at=None, manual=False):
     s = db.get_schedule(sid)
     if not s:
         return False, '定时任务不存在'
+    if is_expired(s):
+        return False, '定时任务已达到设定的运行时长，请先编辑并延长运行时长'
     if not s.get('enabled') and not manual:
         return False, '定时任务已停用'
     planned_at = planned_at or now_str()
@@ -257,6 +284,7 @@ def trigger(sid, planned_at=None, manual=False):
 def due_check_once():
     """跑一次到点检查（测试里直接调用，避免起线程）。"""
     now = now_str()
+    db.expire_schedules(now)
     for s in db.due_schedules(now):
         try:
             trigger(s['id'], planned_at=now)
@@ -327,7 +355,7 @@ def _agg(values):
     return {'n': len(vals), 'avg': sum(vals) / len(vals), 'min': min(vals), 'max': max(vals)}
 
 
-def comparison_data(sid, limit=100):
+def comparison_data(sid, limit=ROUND_LIMIT):
     """把该定时任务的历史轮次整理成「按机器 × 按轮次」的对比数据。"""
     s = db.get_schedule(sid)
     if not s:
@@ -412,7 +440,7 @@ def comparison_data(sid, limit=100):
     }
 
 
-def build_comparison_report(sid, limit=100):
+def build_comparison_report(sid, limit=ROUND_LIMIT):
     """长期对比 Markdown 报告：轮次概览 + 每台机器的均值/极值/趋势。"""
     data = comparison_data(sid, limit=limit)
     if not data:
@@ -420,7 +448,8 @@ def build_comparison_report(sid, limit=100):
     s = data['schedule']
     rounds = data['rounds']
     lines = ['# iperf3 长期对比报告', '']
-    lines.append(f"- **定时任务**：{s['name']}（#{s['id']}，{'启用中' if s['enabled'] else '已停用'}）")
+    state = '已到期' if s.get('expired') else ('启用中' if s['enabled'] else '已停用')
+    lines.append(f"- **定时任务**：{s['name']}（#{s['id']}，{state}）")
     lines.append(f"- **目标机器**：{s['target_name']}（{quality.mask_ip(s.get('target_host') or '')}）")
     lines.append(f"- **后端机器**：{'、'.join(s['backend_names']) or '—'}（{s['backend_count']} 台）")
     proto = 'IPv6' if int(s['ip_version']) == 6 else 'IPv4'
@@ -430,6 +459,8 @@ def build_comparison_report(sid, limit=100):
     finished = max(0, int(s['run_count']) - int(s['fail_count']))
     lines.append(f"- **间隔**：每 {s['interval_text']} · **已完成轮次**：{int(s['run_count'])} 轮"
                  f"（成功 {finished} / 失败 {s['fail_count']} / 未跑成 {s['skip_count']}）")
+    lines.append(f"- **运行时长**：{s['lifetime_text']}"
+                 + (f" · 计划结束 {s['ends_at']}" if s.get('ends_at') else ' · 不会自动停止'))
     lines.append(f"- **当前状态**：{s.get('last_status') or '待首次执行'}"
                  f"{'，' + s['last_error'] if s.get('last_error') else ''}")
     if rounds:

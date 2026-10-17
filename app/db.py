@@ -130,6 +130,8 @@ CREATE TABLE IF NOT EXISTS schedules (
     ping_count INTEGER NOT NULL DEFAULT 200,
     ports TEXT NOT NULL DEFAULT '{}',
     interval_seconds INTEGER NOT NULL DEFAULT 3600,
+    lifetime_seconds INTEGER NOT NULL DEFAULT 0,
+    ends_at TEXT,
     on_busy TEXT NOT NULL DEFAULT 'skip',
     last_run_at TEXT,
     last_run_id INTEGER,
@@ -212,6 +214,12 @@ def init_db():
     # 否则残留进程会占着端口，让后（尤其是定时任务的下一轮）启动失败
     if cols_r and 'served_ports' not in cols_r:
         db.execute("ALTER TABLE runs ADD COLUMN served_ports TEXT NOT NULL DEFAULT ''")
+    # 定时任务生命周期：0 = 不限；ends_at 预先落库，调度查询不用每次换算
+    cols_s = [r['name'] for r in db.execute('PRAGMA table_info(schedules)').fetchall()]
+    if cols_s and 'lifetime_seconds' not in cols_s:
+        db.execute('ALTER TABLE schedules ADD COLUMN lifetime_seconds INTEGER NOT NULL DEFAULT 0')
+    if cols_s and 'ends_at' not in cols_s:
+        db.execute('ALTER TABLE schedules ADD COLUMN ends_at TEXT')
     cols_tb = [r['name'] for r in db.execute('PRAGMA table_info(agent_tombstones)').fetchall()]
     if cols_tb and 'cmd_b64' not in cols_tb:
         # 墓碑是一次性瞬态数据，结构变化直接重建
@@ -791,7 +799,8 @@ def cancel_queued_jobs(machine_ids):
 # 定时任务的字段白名单：改这里就等于改写入面，避免任意列被前端操纵
 _SCHED_COLS = {'name', 'enabled', 'target_id', 'backend_ids', 'ip_version', 'streams',
                'duration', 'port', 'udp', 'udp_bandwidth', 'ping_count', 'ports',
-               'interval_seconds', 'on_busy', 'last_run_at', 'last_run_id', 'last_status',
+               'interval_seconds', 'lifetime_seconds', 'ends_at', 'on_busy',
+               'last_run_at', 'last_run_id', 'last_status',
                'next_run_at', 'run_count', 'fail_count', 'skip_count', 'last_error'}
 
 
@@ -848,7 +857,8 @@ def update_schedule(sid, fields):
 
 def _sched_value(col, val):
     if col in ('enabled', 'ip_version', 'streams', 'duration', 'port', 'udp',
-               'ping_count', 'interval_seconds', 'run_count', 'fail_count', 'skip_count'):
+               'ping_count', 'interval_seconds', 'lifetime_seconds',
+               'run_count', 'fail_count', 'skip_count'):
         return int(val or 0)
     if col in ('backend_ids', 'ports'):
         return json.dumps(val if val is not None else ([] if col == 'backend_ids' else {}),
@@ -869,11 +879,31 @@ def set_schedule_enabled(sid, enabled):
 
 def due_schedules(now=None):
     """到点且启用中的定时任务（长时间没跑过、面板重启恢复后也会被选中）。"""
+    at = _sql_now(now)
     rows = get_db().execute(
         "SELECT * FROM schedules WHERE enabled=1 AND "
-        "COALESCE(next_run_at, datetime('now','localtime')) <= ? "
-        'ORDER BY COALESCE(next_run_at, created_at) ASC', (_sql_now(now),)).fetchall()
+        "COALESCE(next_run_at, datetime('now','localtime')) <= ? AND "
+        '(ends_at IS NULL OR ends_at > ?) '
+        'ORDER BY COALESCE(next_run_at, created_at) ASC', (at, at)).fetchall()
     return [_sched_row(r) for r in rows]
+
+
+def expire_schedules(now=None):
+    """把达到运行时长上限的任务停掉；正在跑的一轮等收尾后再标记。"""
+    at = _sql_now(now)
+    db = get_db()
+    rows = db.execute(
+        "SELECT id FROM schedules WHERE enabled=1 AND ends_at IS NOT NULL "
+        "AND ends_at <= ? AND COALESCE(last_status, '') != 'running'", (at,)).fetchall()
+    ids = [r['id'] for r in rows]
+    if ids:
+        marks = ','.join('?' * len(ids))
+        db.execute(
+            f"UPDATE schedules SET enabled=0, last_status='expired', "
+            f"last_error='已达到设定的运行时长，任务已自动停止', next_run_at=NULL "
+            f"WHERE id IN ({marks})", ids)
+        db.commit()
+    return ids
 
 
 def schedule_next_run(sid, next_at, note=None, failed=False, skipped=False):
@@ -950,24 +980,26 @@ def pending_schedule_runs():
     return [dict(r) for r in rows]
 
 
-def schedule_run_window(sid, limit=100):
+def schedule_run_window(sid, limit=10000):
     """取该定时任务最近 limit 轮**真正跑起来**的测试记录（旧→新），供对比报告使用。"""
     db = get_db()
     rows = db.execute(
-        'SELECT r.id FROM schedule_runs sr JOIN runs r ON r.id = sr.run_id '
+        'SELECT r.* FROM schedule_runs sr JOIN runs r ON r.id = sr.run_id '
         'WHERE sr.schedule_id=? AND sr.run_id IS NOT NULL '
         'ORDER BY sr.id DESC LIMIT ?', (sid, limit)).fetchall()
-    ids = [r['id'] for r in rows][::-1]
-    out = []
-    for rid in ids:
-        run = get_run(rid)
-        if not run:
-            continue
-        items = get_run_items(rid)
-        for it in items:
+    runs = [dict(r) for r in rows][::-1]
+    items_by_run = {run['id']: [] for run in runs}
+    ids = list(items_by_run)
+    # 长测可能有几千轮，分块取明细，避免 N+1 查询以及 SQLite 变量数上限
+    for start in range(0, len(ids), 400):
+        chunk = ids[start:start + 400]
+        marks = ','.join('?' * len(chunk))
+        for row in db.execute(
+                f'SELECT * FROM run_items WHERE run_id IN ({marks}) ORDER BY id', chunk):
+            it = dict(row)
             try:
                 it['metrics_obj'] = json.loads(it['metrics']) if it['metrics'] else None
             except (TypeError, ValueError):
                 it['metrics_obj'] = None
-        out.append({'run': run, 'items': items})
-    return out
+            items_by_run[it['run_id']].append(it)
+    return [{'run': run, 'items': items_by_run[run['id']]} for run in runs]
