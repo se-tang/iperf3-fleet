@@ -1,3 +1,5 @@
+<img src="app/static/logo.svg" width="56" height="56" alt="iperf3-fleet logo" align="left" hspace="12"/>
+
 # iperf3-fleet
 
 Docker 化的 iperf3 多机线路质量测试面板：一台**目标机**（被测端）+ 多台**后端机**（发起端），逐台测速并生成带线路质量评价的 Markdown 报告。机器通过 Agent 接入，**面板不保存任何 SSH 凭据**。

@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>iperf3-fleet 线路测试面板</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>"/>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}"/>
 <style>
 :root{
   --bg:#f6f2e7; --card:#fffdf4; --border:#ddd5bd; --text:#33312a; --muted:#8a8471;
@@ -23,7 +23,8 @@ body[data-theme='dark']{
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
 header{display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:10}
-header h1{font-size:18px;margin:0}
+header h1{font-size:18px;margin:0;display:flex;align-items:center;gap:9px;min-width:0}
+.brand-mark{width:30px;height:30px;flex:none;display:block}
 main{max-width:1240px;margin:0 auto;padding:18px 22px 60px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:18px}
 .card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:10px}
@@ -133,7 +134,8 @@ kbd{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;p
 </head>
 <body>
 <header>
-  <h1>📡 iperf3-fleet 线路测试面板 <span class="muted" style="font-size:12px;font-weight:400">v{{ version }}</span></h1>
+  <h1><img class="brand-mark" src="{{ url_for('static', filename='logo.svg') }}" alt=""/>
+    <span>iperf3-fleet 线路测试面板 <span class="muted" style="font-size:12px;font-weight:400">v{{ version }}</span></span></h1>
   <div class="actions">
     <span id="meUser" class="muted" style="font-size:12px"></span>
     <button class="small" data-action="toggleTheme" id="themeBtn">🌙 深色</button>

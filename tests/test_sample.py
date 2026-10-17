@@ -1369,6 +1369,23 @@ def test_udp_controls_initial_state():
     print('UDP 带宽输入框初始状态同步 OK')
 
 
+def test_brand_logo():
+    """主页、登录页与 favicon 必须使用项目内 SVG 标识，不再使用 emoji。"""
+    from app.app import app as flask_app
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for name in ('index.html', 'login.html'):
+        with open(os.path.join(root, 'app', 'templates', name), encoding='utf-8') as f:
+            page = f.read()
+        assert 'logo.svg' in page and '📡' not in page, name
+    with open(os.path.join(root, 'app', 'static', 'logo.svg'), encoding='utf-8') as f:
+        logo = f.read()
+    assert '<svg' in logo and '#38bdf8' in logo and '#4ade80' in logo
+    resp = flask_app.test_client().get('/static/logo.svg')
+    assert resp.status_code == 200
+    assert resp.mimetype in ('image/svg+xml', 'image/svg+xml;charset=utf-8'), resp.mimetype
+    print('SVG 品牌标识 / favicon OK')
+
+
 if __name__ == '__main__':
     test_parse()
     test_units()
@@ -1396,4 +1413,5 @@ if __name__ == '__main__':
     test_version_sync()
     test_install_dirty_update()
     test_udp_controls_initial_state()
+    test_brand_logo()
     print('\nALL TESTS PASSED')
